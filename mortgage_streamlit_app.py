@@ -1,7 +1,7 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-from scipy.optimize import curve_fit, minimize_scalar
+from scipy.optimize import curve_fit, minimize_scalar, newton
 import plotly.graph_objects as go
 
 # ====================== PAGE CONFIG ======================
@@ -12,15 +12,15 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ====================== ULTRA MINIMAL FINTECH UI ======================
+# ====================== ULTRA-MODERN FINTECH UI ======================
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@200;300;400;500&display=swap');
 
-html, body, [class*="css"]  {
+html, body, [class*='css'] {
     background-color: #070A0F;
     color: #E6EDF7;
-    font-family: 'IBM Plex Sans', 'Helvetica Neue', sans-serif;
+    font-family: 'IBM Plex Sans', sans-serif;
     font-weight: 300;
 }
 
@@ -31,36 +31,26 @@ html, body, [class*="css"]  {
     background: linear-gradient(90deg,#7dd3fc,#a78bfa,#34d399);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
-    margin-bottom: 0.5rem;
 }
 
 .stMetric {
     background: rgba(255,255,255,0.03);
-    border-radius: 20px;
+    border-radius: 18px;
     padding: 16px;
     box-shadow: 0 12px 40px rgba(0,0,0,0.4);
-    border: 1px solid rgba(255,255,255,0.05);
 }
 
-section[data-testid="stSidebar"] {
+section[data-testid='stSidebar'] {
     background-color: #05070B;
 }
 
-.block-container {
-    padding-top: 2rem;
-}
-
-/* micro interaction */
-button:hover {
-    transform: translateY(-1px);
-    transition: all 0.15s ease;
-}
+.block-container { padding-top: 2rem; }
 
 </style>
 """, unsafe_allow_html=True)
 
-# ====================== CORE FUNCTIONS ======================
-@st.cache_data(ttl=3600)
+# ====================== CORE FINANCE FUNCTIONS ======================
+
 def calculate_monthly_payment(principal, annual_rate, term_months):
     if principal <= 0 or term_months <= 0:
         return 0.0
@@ -69,14 +59,25 @@ def calculate_monthly_payment(principal, annual_rate, term_months):
         return principal / term_months
     return principal * r * (1 + r) ** term_months / ((1 + r) ** term_months - 1)
 
-# ====================== SIMULATION ENGINE ======================
-@st.cache_data(ttl=3600)
+
+def solve_term(principal, annual_rate, payment):
+    if principal <= 0 or payment <= 0:
+        return 0
+    r = annual_rate / 12 / 100
+    if r == 0:
+        return principal / payment
+    return np.log(payment / (payment - principal * r)) / np.log(1 + r)
+
+# ====================== FULL SIMULATION (RESTORED + EXTENDED) ======================
+
 def simulate_split_loan(var_p, fix_p, var_rate, fix_rate, revert_rate,
                         fixed_years, term_months,
-                        offset_start_month=0,
+                        offset_start_orig=0,
+                        offset_start_new=0,
                         monthly_offset_add=0,
                         monthly_fees=0,
-                        one_time_fees=0):
+                        one_time_fees=0,
+                        mode="term"):
 
     fixed_months = int(fixed_years * 12)
 
@@ -92,7 +93,8 @@ def simulate_split_loan(var_p, fix_p, var_rate, fix_rate, revert_rate,
 
     for m in range(1, int(term_months) + 1):
 
-        if m >= offset_start_month:
+        # offset timing (dual regime)
+        if m >= offset_start_orig or m >= offset_start_new:
             offset += monthly_offset_add
 
         # VARIABLE
@@ -122,8 +124,8 @@ def simulate_split_loan(var_p, fix_p, var_rate, fix_rate, revert_rate,
     df = pd.DataFrame(schedule, columns=["month","interest","principal","balance","offset"])
     return df, total_interest, total_paid
 
-# ====================== OPTIMISATION ======================
-@st.cache_data(ttl=3600)
+# ====================== OPTIMISATION ENGINE ======================
+
 def find_optimal_split(loan, var_r, fix_r, revert_r, fy, tm,
                        offset_start, offset_add):
 
@@ -136,7 +138,8 @@ def find_optimal_split(loan, var_r, fix_r, revert_r, fy, tm,
         fp = loan * s/100
 
         df, _, _ = simulate_split_loan(vp, fp, var_r, fix_r, revert_r,
-                                       fy, tm, offset_start, offset_add)
+                                       fy, tm, offset_start, offset_start,
+                                       offset_add)
 
         interest.append(df["interest"].sum())
         debt.append(df.iloc[-1]["balance"])
@@ -145,35 +148,34 @@ def find_optimal_split(loan, var_r, fix_r, revert_r, fy, tm,
     debt = np.array(debt)
 
     def cost(s):
-        i = np.interp(s, splits, interest)
-        d = np.interp(s, splits, debt)
-        return i + 0.5 * d
+        return np.interp(s, splits, interest) + 0.5 * np.interp(s, splits, debt)
 
     res = minimize_scalar(cost, bounds=(0,100), method="bounded")
 
     return int(res.x), splits, interest, debt
 
 # ====================== UI ======================
+
 st.markdown('<div class="main-header">Loan Refinance Optimiser</div>', unsafe_allow_html=True)
 
 with st.sidebar:
 
     st.header("Original Loan")
-    orig_val = st.number_input("House valuation", value=850000.0)
-    orig_loan = st.number_input("Loan amount", value=620000.0)
-    orig_term = st.number_input("Loan term (months)", value=300.0)
-    orig_rate = st.number_input("Interest rate (%)", value=6.35)
+    orig_val = st.number_input("House valuation")
+    orig_loan = st.number_input("Loan amount")
+    orig_term = st.number_input("Loan term (months)")
+    orig_rate = st.number_input("Interest rate (%)")
 
-    st.metric("Original LVR", f"{orig_loan / orig_val * 100:.2f}%")
+    st.metric("Original LVR", f"{orig_loan / max(orig_val,1) * 100:.2f}%")
 
     st.divider()
 
     st.header("Refinance")
-    loan_left = st.number_input("Remaining loan", value=orig_loan)
-    var_rate = st.number_input("Variable rate", value=5.5)
-    fix_rate = st.number_input("Fixed rate", value=4.9)
-    revert_rate = st.number_input("Revert rate", value=6.3)
-    fixed_years = st.number_input("Fixed years", value=2.0)
+    loan_left = st.number_input("Remaining loan")
+    var_rate = st.number_input("Variable rate")
+    fix_rate = st.number_input("Fixed rate")
+    revert_rate = st.number_input("Revert rate")
+    fixed_years = st.number_input("Fixed years")
 
     st.divider()
 
@@ -181,57 +183,74 @@ with st.sidebar:
 
     mode = st.radio("Loan mode", ["Keep term fixed", "Keep payment fixed"])
 
-    offset_start_orig = st.number_input("Offset start (orig months)", value=0.0)
-    offset_start_new = st.number_input("Offset start (new months)", value=0.0)
-    monthly_offset_add = st.number_input("Monthly offset add", value=1000.0)
+    offset_start_orig = st.number_input("Offset start (orig)")
+    offset_start_new = st.number_input("Offset start (new)")
+    monthly_offset_add = st.number_input("Monthly offset add")
 
-    monthly_fees = st.number_input("Monthly fees", value=0.0)
-    one_time_fees = st.number_input("Upfront fees", value=300.0)
+    monthly_fees = st.number_input("Monthly fees")
+    one_time_fees = st.number_input("Upfront fees")
 
 # ====================== MAIN ======================
-if loan_left > 0:
 
-    term = orig_term
+if loan_left > 0:
 
     df, interest, paid = simulate_split_loan(
         loan_left, 0, var_rate, 0, 0,
-        fixed_years, term,
-        offset_start_new, monthly_offset_add,
-        monthly_fees, one_time_fees
+        fixed_years, orig_term,
+        offset_start_orig, offset_start_new,
+        monthly_offset_add,
+        monthly_fees, one_time_fees,
+        mode
     )
 
     opt, s, i, d = find_optimal_split(
         loan_left, var_rate, fix_rate, revert_rate,
-        fixed_years, term,
+        fixed_years, orig_term,
         offset_start_new, monthly_offset_add
     )
 
-    st.subheader("Optimised Outcome")
+    st.subheader("Core Results")
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Optimal split % fixed", f"{opt}%")
-    c2.metric("Interest", f"${interest:,.0f}")
+    c2.metric("Total interest", f"${interest:,.0f}")
     c3.metric("Total paid", f"${paid:,.0f}")
+
+    # ====================== 2D + 3D VISUALS ======================
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df["month"], y=df["balance"], name="Balance"))
     fig.add_trace(go.Scatter(x=df["month"], y=df["interest"], name="Interest"))
-
-    fig.update_layout(
-        template="plotly_dark",
-        height=520,
-        margin=dict(l=20,r=20,t=40,b=20)
-    )
-
+    fig.update_layout(template="plotly_dark", height=450)
     st.plotly_chart(fig, use_container_width=True)
 
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=s, y=i, name="Interest curve"))
-    fig2.add_trace(go.Scatter(x=s, y=d, name="Debt curve"))
+    # 3D SURFACE: SPLIT vs TIME vs INTEREST
+    x = np.linspace(0, 100, 20)
+    y = np.linspace(12, orig_term, 20)
+    X, Y = np.meshgrid(x, y)
+    Z = np.zeros_like(X)
 
-    fig2.update_layout(template="plotly_dark", height=420)
+    for i in range(len(x)):
+        for j in range(len(y)):
+            vp = loan_left * (1 - x[i]/100)
+            fp = loan_left * (x[i]/100)
+            df2, _, _ = simulate_split_loan(
+                vp, fp, var_rate, fix_rate, revert_rate,
+                fixed_years, int(y[j]),
+                offset_start_orig, offset_start_new,
+                monthly_offset_add,
+                monthly_fees, one_time_fees
+            )
+            Z[j,i] = df2["interest"].sum()
 
-    st.plotly_chart(fig2, use_container_width=True)
+    fig3 = go.Figure(data=[go.Surface(x=X, y=Y, z=Z)])
+    fig3.update_layout(
+        title="3D Interest Surface (Split vs Term vs Cost)",
+        template="plotly_dark",
+        height=600
+    )
+
+    st.plotly_chart(fig3, use_container_width=True)
 
 else:
     st.info("Enter loan details")
