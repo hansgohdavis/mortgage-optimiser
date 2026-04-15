@@ -44,8 +44,7 @@ with st.sidebar:
     loan_balance = st.number_input("Loan Balance", value=1000000.0)
     term_months = st.number_input("Loan Term (months)", value=360)
 
-    base_rate = st.number_input("Base Variable Rate", value=0.0589, step=0.0001,      # Controls the precision of + / - buttons
-    format="%0.4f"    # Controls the visual display precision
+    base_rate = st.number_input("Base Variable Rate", value=0.0589, step=0.0001, format="%0.4f")    
 
     if scenario == "RBA +0.5%":
         var_rate = 0.0639 , step=0.0001, format="%0.4f"
