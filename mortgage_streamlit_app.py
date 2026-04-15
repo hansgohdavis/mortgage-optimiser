@@ -1,16 +1,40 @@
+"""
+Mortgage Optimiser — Fintech UI Version
+-------------------------------------
+Clean, modern UI with:
+- KPI cards
+- Tabs
+- Better layout
+"""
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(layout="wide")
-st.title("🏡 Mortgage Optimiser (Client-Ready)")
+
+# -----------------------------
+# STYLING
+# -----------------------------
+st.markdown("""
+<style>
+.metric-card {
+    padding: 20px;
+    border-radius: 12px;
+    background-color: #111827;
+    color: white;
+    text-align: center;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🏦 Mortgage Optimiser")
 
 # -----------------------------
 # INPUTS
 # -----------------------------
 with st.sidebar:
-    st.header("Inputs")
+    st.header("⚙️ Inputs")
 
     scenario = st.selectbox(
         "Scenario",
@@ -20,18 +44,19 @@ with st.sidebar:
     loan_balance = st.number_input("Loan Balance", value=1000000.0)
     term_months = st.number_input("Loan Term (months)", value=360)
 
-    base_rate = st.number_input("Base Variable Rate", value=5.89%)
+    base_rate = st.number_input("Base Variable Rate", value=0.0589, step=0.0001,      # Controls the precision of + / - buttons
+    format="%0.4f"    # Controls the visual display precision
 
     if scenario == "RBA +0.5%":
-        var_rate = 6.39%
+        var_rate = 0.0639 , step=0.0001, format="%0.4f"
     elif scenario == "Rates Hold":
-        var_rate = 5.89%
+        var_rate = 0.0589 , step=0.0001, format="%0.4f"
     elif scenario == "Rates Rise Aggressively":
-        var_rate = 7.89%
+        var_rate = 0.0739 , step=0.0001, format="%0.4f"
     else:
-        var_rate = st.number_input("Variable Rate", value=5.65%)
+        var_rate = st.number_input("Variable Rate", value=0.0565 , step=0.0001, format="%0.4f")
 
-    fix_rate = st.number_input("Fixed Rate", value=5.85%)
+    fix_rate = st.number_input("Fixed Rate", value=0.0585 , step=0.0001, format="%0.4f")
     fixed_years = st.slider("Fixed Years", 1, 10, 2)
 
     offset = st.number_input("Offset", value=100000.0)
@@ -45,6 +70,7 @@ def monthly_payment(P, r, n):
     if r_m == 0:
         return P / n
     return P * (r_m * (1 + r_m) ** n) / ((1 + r_m) ** n - 1)
+
 
 def simulate_variable(P, r, n, offset, offset_add):
     balance = P
@@ -64,6 +90,7 @@ def simulate_variable(P, r, n, offset, offset_add):
             break
 
     return total_interest
+
 
 def optimise_split(P, r_var, r_fix, years, offset, offset_add):
     results = []
@@ -91,22 +118,50 @@ df, best = optimise_split(
 )
 
 # -----------------------------
-# OUTPUTS
+# KPI CARDS
 # -----------------------------
-st.subheader("📊 Client Summary")
+col1, col2, col3 = st.columns(3)
 
-st.write(f"Optimal Fixed Split: {int(best['split'])}%")
-st.write(f"Estimated Total Cost (fixed period): ${best['total_cost']:,.0f}")
+col1.markdown(f"""
+<div class="metric-card">
+<h3>Optimal Split</h3>
+<h1>{int(best['split'])}%</h1>
+</div>
+""", unsafe_allow_html=True)
 
-st.subheader("Optimisation Curve")
-st.line_chart(df.set_index("split"))
+col2.markdown(f"""
+<div class="metric-card">
+<h3>Total Cost</h3>
+<h1>${best['total_cost']:,.0f}</h1>
+</div>
+""", unsafe_allow_html=True)
 
-# Save scenarios
-if "saved_runs" not in st.session_state:
-    st.session_state.saved_runs = []
+col3.markdown(f"""
+<div class="metric-card">
+<h3>Fixed Years</h3>
+<h1>{fixed_years}</h1>
+</div>
+""", unsafe_allow_html=True)
 
-if st.button("Save Scenario"):
-    st.session_state.saved_runs.append(best.to_dict())
+# -----------------------------
+# TABS
+# -----------------------------
+tab1, tab2 = st.tabs(["📈 Optimisation", "💾 Scenarios"])
 
-st.subheader("Saved Scenarios")
-st.write(st.session_state.saved_runs)
+with tab1:
+    st.subheader("Optimisation Curve")
+    st.line_chart(df.set_index("split"))
+
+with tab2:
+    if "saved_runs" not in st.session_state:
+        st.session_state.saved_runs = []
+
+    if st.button("Save Scenario"):
+        st.session_state.saved_runs.append(best.to_dict())
+
+    st.write(st.session_state.saved_runs)
+
+# -----------------------------
+# FOOTER
+# -----------------------------
+st.caption("Fintech-style mortgage optimisation tool — decision support, not financial advice.")
