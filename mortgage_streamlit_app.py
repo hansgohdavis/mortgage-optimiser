@@ -20,18 +20,18 @@ with st.sidebar:
     loan_balance = st.number_input("Loan Balance", value=1000000.0)
     term_months = st.number_input("Loan Term (months)", value=360)
 
-    base_rate = st.number_input("Base Variable Rate", value=0.0589)
+    base_rate = st.number_input("Base Variable Rate", value=5.89%)
 
     if scenario == "RBA +0.5%":
-        var_rate = 0.0639
+        var_rate = 6.39%
     elif scenario == "Rates Hold":
-        var_rate = 0.0589
+        var_rate = 5.89%
     elif scenario == "Rates Rise Aggressively":
-        var_rate = 0.0789
+        var_rate = 7.89%
     else:
-        var_rate = st.number_input("Variable Rate", value=0.0565)
+        var_rate = st.number_input("Variable Rate", value=5.65%)
 
-    fix_rate = st.number_input("Fixed Rate", value=0.0585)
+    fix_rate = st.number_input("Fixed Rate", value=5.85%)
     fixed_years = st.slider("Fixed Years", 1, 10, 2)
 
     offset = st.number_input("Offset", value=100000.0)
