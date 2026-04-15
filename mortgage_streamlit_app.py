@@ -1,10 +1,9 @@
 """
-Mortgage Optimiser — Fintech UI Version
--------------------------------------
-Clean, modern UI with:
-- KPI cards
-- Tabs
-- Better layout
+Mortgage Optimiser — Fintech UI Version (4dp rates)
+---------------------------------------------------
+Updates:
+- Interest rates now support 4 decimal precision
+- Inputs constrained to 0.0001 step precision
 """
 
 import numpy as np
@@ -41,29 +40,46 @@ with st.sidebar:
         ["Custom", "RBA +0.5%", "Rates Hold", "Rates Rise Aggressively"]
     )
 
-    loan_balance = st.number_input("Loan Balance", value:=1000000.0)
-    term_months = st.number_input("Loan Term (months)", value:=360)
+    loan_balance = st.number_input("Loan Balance", value=600000.0)
+    term_months = st.number_input("Loan Term (months)", value=360)
 
-    base_rate = st.number_input("Base Variable Rate", value:=0.0589, step==0.0001, format=="%0.4f")    
+    base_rate = st.number_input(
+        "Base Variable Rate",
+        value=0.0600,
+        format="%.4f",
+        step=0.0001
+    )
 
     if scenario == "RBA +0.5%":
-        var_rate := 0.0639 , step==0.0001, format=="%0.4f"
+        var_rate = 0.0650
     elif scenario == "Rates Hold":
-        var_rate := 0.0589 , step==0.0001, format=="%0.4f"
+        var_rate = 0.0600
     elif scenario == "Rates Rise Aggressively":
-        var_rate := 0.0739 , step==0.0001, format=="%0.4f"
+        var_rate = 0.0750
     else:
-        var_rate = st.number_input("Variable Rate", value:=0.0565 , step==0.0001, format=="%0.4f")
+        var_rate = st.number_input(
+            "Variable Rate",
+            value=0.0650,
+            format="%.4f",
+            step=0.0001
+        )
 
-    fix_rate = st.number_input("Fixed Rate", value:=0.0585 , step==0.0001, format=="%0.4f")
+    fix_rate = st.number_input(
+        "Fixed Rate",
+        value=0.0550,
+        format="%.4f",
+        step=0.0001
+    )
+
     fixed_years = st.slider("Fixed Years", 1, 10, 2)
 
-    offset = st.number_input("Offset", value:=100000.0)
-    offset_add = st.number_input("Monthly Offset Add", value:=5000.0)
+    offset = st.number_input("Offset", value=50000.0)
+    offset_add = st.number_input("Monthly Offset Add", value=1000.0)
 
 # -----------------------------
 # CORE FUNCTIONS
 # -----------------------------
+
 def monthly_payment(P, r, n):
     r_m = r / 12
     if r_m == 0:
