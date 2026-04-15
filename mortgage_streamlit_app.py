@@ -17,25 +17,25 @@ with st.sidebar:
         ["Custom", "RBA +0.5%", "Rates Hold", "Rates Rise Aggressively"]
     )
 
-    loan_balance = st.number_input("Loan Balance", value=600000.0)
+    loan_balance = st.number_input("Loan Balance", value=1000000.0)
     term_months = st.number_input("Loan Term (months)", value=360)
 
-    base_rate = st.number_input("Base Variable Rate", value=0.06)
+    base_rate = st.number_input("Base Variable Rate", value=0.0589)
 
     if scenario == "RBA +0.5%":
-        var_rate = 0.065
+        var_rate = 0.0639
     elif scenario == "Rates Hold":
-        var_rate = 0.06
+        var_rate = 0.0589
     elif scenario == "Rates Rise Aggressively":
-        var_rate = 0.075
+        var_rate = 0.0789
     else:
-        var_rate = st.number_input("Variable Rate", value=0.065)
+        var_rate = st.number_input("Variable Rate", value=0.0565)
 
-    fix_rate = st.number_input("Fixed Rate", value=0.055)
+    fix_rate = st.number_input("Fixed Rate", value=0.0585)
     fixed_years = st.slider("Fixed Years", 1, 10, 2)
 
-    offset = st.number_input("Offset", value=50000.0)
-    offset_add = st.number_input("Monthly Offset Add", value=1000.0)
+    offset = st.number_input("Offset", value=100000.0)
+    offset_add = st.number_input("Monthly Offset Add", value=5000.0)
 
 # -----------------------------
 # CORE FUNCTIONS
