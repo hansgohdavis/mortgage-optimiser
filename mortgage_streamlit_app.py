@@ -120,10 +120,7 @@ def find_optimal_split(loan_left, variable_rate, fixed_rate, revert_rate, fixed_
     try:
         popt_i, _ = curve_fit(logistic, x, y_interest, p0=[max(y_interest), 0.08, 50, min(y_interest)], maxfev=10000)
         popt_d, _ = curve_fit(logistic, x, y_debt, p0=[max(y_debt), 0.08, 50, min(y_debt)], maxfev=10000)
-        
-        def combined_cost(s):
-            return logistic(s, *popt_i) + 0.5 * logistic(s, *popt_d)
-        
+        def combined_cost(s): return logistic(s, *popt_i) + 0.5 * logistic(s, *popt_d)
         res = minimize_scalar(combined_cost, bounds=(0, 100), method="bounded", tol=1e-6)
         optimal_split = round(res.x)
     except:
@@ -131,13 +128,11 @@ def find_optimal_split(loan_left, variable_rate, fixed_rate, revert_rate, fixed_
     
     if strategy == "Conservative": optimal_split = 80
     elif strategy == "Aggressive": optimal_split = 20
-    
     return int(optimal_split), splits, y_interest, y_debt
 
-# ====================== HYPERMODERN STREAMLIT APP ======================
+# ====================== HYPERMODERN UI ======================
 st.set_page_config(page_title="Loan Refinance Optimiser", page_icon="🏠", layout="wide")
 
-# Dynamic background (changes only with strategy - awwwards style fade)
 strategy = st.session_state.get("strategy", "Balanced")
 bg_urls = {
     "Conservative": "https://picsum.photos/id/1015/1920/1080",
@@ -147,10 +142,7 @@ bg_urls = {
 
 st.markdown(f"""
 <style>
-    .stApp {{
-        background: linear-gradient(rgba(10,10,10,0.92), rgba(10,10,10,0.92)), url('{bg_urls.get(strategy, bg_urls["Balanced"])}') center/cover no-repeat fixed;
-        transition: background-image 0.8s cubic-bezier(0.4, 0, 0.2, 1);
-    }}
+    .stApp {{background: linear-gradient(rgba(10,10,10,0.92), rgba(10,10,10,0.92)), url('{bg_urls.get(strategy)}') center/cover no-repeat fixed; transition: background-image 0.8s cubic-bezier(0.4, 0, 0.2, 1);}}
     .main-header {{font-family:'Space Grotesk',sans-serif; font-size:3rem; background:linear-gradient(90deg,#00d4ff,#fff); -webkit-background-clip:text; -webkit-text-fill-color:transparent; letter-spacing:-2px;}}
     .stMetric {{background:rgba(255,255,255,0.08); border-radius:20px; padding:24px 20px; box-shadow:0 10px 30px rgba(0,212,255,0.15);}}
 </style>
@@ -184,6 +176,17 @@ with st.sidebar:
     effective_var_rate = current_rate + rba_change if rba_scenario == "Increase by %" else current_rate - rba_change if rba_scenario == "Decrease by %" else current_rate
     
     st.divider()
+    st.header("New Fixed Loan")
+    new_fixed_rate = st.number_input("New fixed rate (%)", value=4.99, step=0.01)
+    fixed_yrs = st.number_input("Fixed period (years)", value=2, min_value=1, max_value=5, step=1)
+    revert_rate = st.number_input("Rate after fixed (%)", value=6.35, step=0.01)
+    
+    st.divider()
+    st.header("Fees")
+    monthly_fees = st.number_input("Monthly fees ($)", value=8.0, step=1.0)
+    one_time_fees = st.number_input("One-time fees ($)", value=299.0, step=50.0)
+    
+    st.divider()
     st.header("Strategy")
     strategy = st.selectbox("Choose strategy", ["Conservative", "Balanced", "Aggressive"], key="strategy")
     
@@ -194,36 +197,28 @@ with st.sidebar:
     st.divider()
     st.header("Multiple Adjustments (up to 15)")
     st.caption("Rate changes (prospective only)")
-    rate_changes = st.data_editor(
-        pd.DataFrame({"Date": [current_date], "Type": ["Variable"], "New Rate (%)": [effective_var_rate]}),
-        num_rows="dynamic", use_container_width=True
-    )
+    rate_changes = st.data_editor(pd.DataFrame({"Date": [current_date], "Type": ["Variable"], "New Rate (%)": [effective_var_rate]}), num_rows="dynamic", use_container_width=True)
     
     st.caption("Offset changes")
-    offset_changes = st.data_editor(
-        pd.DataFrame({"Date": [current_date], "Offset Amount ($)": [offset_current]}),
-        num_rows="dynamic", use_container_width=True
-    )
+    offset_changes = st.data_editor(pd.DataFrame({"Date": [current_date], "Offset Amount ($)": [offset_current]}), num_rows="dynamic", use_container_width=True)
 
-# Date error check
+# Date validation
 if any(rate_changes["Date"] < orig_date for _, row in rate_changes.iterrows()):
     st.error("Error: Rate change cannot occur before original loan date")
     st.stop()
 
 # ====================== LIVE CALCULATION ======================
 if loan_left > 0:
-    term_months = 300  # default remaining term
-    baseline_df, _, baseline_paid = simulate_split_loan(loan_left, 0, current_rate, 0, 0, 0, term_months, offset_current, monthly_offset_add, offset_delay)
+    term_months = 300
+    baseline_df, _, baseline_paid = simulate_split_loan(loan_left, 0, current_rate, 0, 0, 0, term_months, offset_current, monthly_offset_add, offset_delay, monthly_fees, one_time_fees)
     baseline_monthly = calculate_monthly_payment(loan_left, current_rate, term_months)
     
-    optimal_split, splits, y_interest, y_debt = find_optimal_split(
-        loan_left, effective_var_rate, 4.99, 6.35, 2, term_months,
-        offset_current, monthly_offset_add, offset_delay, 8.0, 299.0, strategy)
+    optimal_split, splits, y_interest, y_debt = find_optimal_split(loan_left, effective_var_rate, new_fixed_rate, revert_rate, fixed_yrs, term_months, offset_current, monthly_offset_add, offset_delay, monthly_fees, one_time_fees, strategy)
     
     opt_var_p = loan_left * (1 - optimal_split / 100)
     opt_fixed_p = loan_left * (optimal_split / 100)
-    opt_df, _, opt_paid = simulate_split_loan(opt_var_p, opt_fixed_p, effective_var_rate, 4.99, 6.35, 2, term_months, offset_current, monthly_offset_add, offset_delay)
-    opt_monthly = calculate_monthly_payment(opt_var_p, effective_var_rate, term_months) + calculate_monthly_payment(opt_fixed_p, 4.99, term_months)
+    opt_df, _, opt_paid = simulate_split_loan(opt_var_p, opt_fixed_p, effective_var_rate, new_fixed_rate, revert_rate, fixed_yrs, term_months, offset_current, monthly_offset_add, offset_delay, monthly_fees, one_time_fees)
+    opt_monthly = calculate_monthly_payment(opt_var_p, effective_var_rate, term_months) + calculate_monthly_payment(opt_fixed_p, new_fixed_rate, term_months)
     
     # ====================== ANALYSIS DASHBOARD ======================
     tab1, tab2, tab3 = st.tabs(["📊 Analysis Dashboard", "🔬 Optimisation Curve", "🎯 Conclusion"])
@@ -232,14 +227,14 @@ if loan_left > 0:
         st.subheader("Monthly Payments")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Current Baseline", f"${baseline_monthly:,.2f}")
-        c4.metric("Optimal New Split", f"${opt_monthly:,.2f}", f"-${baseline_monthly-opt_monthly:,.2f}")
+        c4.metric("Optimal New Split", f"${opt_monthly:,.2f}", f"-${baseline_monthly - opt_monthly:,.2f}")
         
         st.subheader("Cumulative Figures")
         cc1, cc2 = st.columns(2)
         cc1.metric("Total paid – Current", f"${baseline_paid:,.0f}")
-        cc2.metric("Total paid – Optimal New", f"${opt_paid:,.0f}", f"Save ${baseline_paid-opt_paid:,.0f}")
+        cc2.metric("Total paid – Optimal New", f"${opt_paid:,.0f}", f"Save ${baseline_paid - opt_paid:,.0f}")
         
-        st.subheader("Overlaid Comparison (Current vs New)")
+        st.subheader("Overlaid Comparison")
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=baseline_df["month"], y=baseline_df["balance"], name="Current Balance", line=dict(color="#ff4d4d")))
         fig.add_trace(go.Scatter(x=opt_df["month"], y=opt_df["balance"], name="Optimal New Balance", line=dict(color="#00d4ff")))
@@ -257,8 +252,8 @@ if loan_left > 0:
     
     with tab3:
         st.success(f"Optimal split ratio: **{optimal_split}% fixed** ({strategy} strategy)")
-        st.metric("New monthly payment", f"${opt_monthly:,.2f}", f"Save ${baseline_monthly-opt_monthly:,.2f} per month")
-        st.metric("Total cost of new structure", f"${opt_paid:,.0f}", f"Save ${baseline_paid-opt_paid:,.0f}")
+        st.metric("New monthly payment", f"${opt_monthly:,.2f}", f"Save ${baseline_monthly - opt_monthly:,.2f} per month")
+        st.metric("Total cost of new structure", f"${opt_paid:,.0f}", f"Save ${baseline_paid - opt_paid:,.0f}")
         st.metric("Effective rate after 2 years", "4.85%")
         st.metric("Effective rate after 19 years", "5.12%")
 
