@@ -477,41 +477,85 @@ def fetch_rba_next_meeting()->str|None:
 @st.cache_data(ttl=300,show_spinner=False)
 def fetch_asx_rba_data()->dict:
     """
-    Attempts to fetch ASX 30-day interbank cash rate futures data.
-    Returns dict with available fields, or empty dict on failure.
-    ASX pages are JavaScript-rendered; direct fetch returns shell HTML only.
+    Fetch ASX 30-day interbank cash rate futures / RBA probability data.
+    Priority:
+      1. rba.isaacgross.net  — aggregated RBA/ASX probability data (JSON API)
+      2. ASX direct JSON endpoints (may require auth)
+      3. Falls back to empty dict; manual calculator is always available.
     """
     result={}
-    # Attempt 1: ASX market data JSON endpoint for IB futures
-    try:
-        endpoints=[
+
+    # ── Attempt 1: rba.isaacgross.net API ────────────────────────────────
+    ig_base="https://rba.isaacgross.net"
+    ig_paths=["/api/rates","/api","/api/v1/rates","/api/cash-rate",
+              "/api/futures","/api/probability","/rates","/data"]
+    for path in ig_paths:
+        try:
+            r=requests.get(f"{ig_base}{path}",headers={
+                "User-Agent":"Mozilla/5.0 (compatible; AU-Mortgage/2.0)",
+                "Accept":"application/json",
+                "Referer":"https://rba.isaacgross.net/",
+            },timeout=6)
+            if r.status_code==200 and "json" in r.headers.get("Content-Type",""):
+                data=r.json()
+                result.update({"source":"isaacgross","data":data})
+                # Try to extract futures price and implied rate
+                if isinstance(data,dict):
+                    for key in ["futures_price","ib_price","price","implied_rate","rate"]:
+                        if key in data:
+                            result["futures_price"]=float(data[key]); break
+                    for key in ["probability","prob","rate_change_prob"]:
+                        if key in data:
+                            result["probability"]=float(data[key]); break
+                elif isinstance(data,list) and len(data)>0:
+                    result["raw_list"]=data
+                break
+        except: pass
+
+    # ── Attempt 2: isaacgross root page — parse JSON from script tags ─────
+    if "futures_price" not in result:
+        try:
+            r=requests.get(ig_base,headers={
+                "User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Accept":"text/html,*/*",
+            },timeout=8)
+            if r.status_code==200:
+                # Extract JSON data embedded in page
+                for pat in [
+                    r'"futures_price"\s*:\s*([\d.]+)',
+                    r'"ib_price"\s*:\s*([\d.]+)',
+                    r'"price"\s*:\s*([\d.]+)',
+                    r'"implied_rate"\s*:\s*([\d.]+)',
+                    r'(9[4-9]\.\d{2})',  # IB futures typically 94-99
+                ]:
+                    m=re.search(pat,r.text)
+                    if m:
+                        v=float(m.group(1))
+                        if 90<v<100:
+                            result["futures_price"]=v
+                            result["implied_yield"]=round(100-v,4)
+                            result["source"]="isaacgross_page"
+                            break
+                # Extract probability
+                for pat in [r'"probability"\s*:\s*([\d.]+)',r'"prob"\s*:\s*([\d.]+)']:
+                    m=re.search(pat,r.text)
+                    if m:
+                        result["probability"]=float(m.group(1)); break
+        except: pass
+
+    # ── Attempt 3: ASX direct JSON endpoints ─────────────────────────────
+    if not result:
+        for url in [
             "https://www.asx.com.au/asx/1/exchange/IB/prices",
             "https://www.asx.com.au/data/trendlens_snapshot/IB.json",
-        ]
-        for url in endpoints:
-            r=requests.get(url,headers=HDRS,timeout=6)
-            if r.status_code==200:
-                data=r.json()
-                result["raw"]=data; result["source"]=url
-                break
-    except: pass
-
-    # Attempt 2: Parse embedded JSON from rate tracker page
-    if not result:
-        try:
-            r=requests.get("https://www.asx.com.au/markets/trade-our-derivatives-market/futures-market/rba-rate-tracker",
-                          headers=HDRS,timeout=8)
-            if r.status_code==200:
-                # Look for JSON data blocks
-                json_blks=re.findall(r'window\.__INITIAL_STATE__\s*=\s*({.*?});',r.text,re.DOTALL)
-                if not json_blks:
-                    json_blks=re.findall(r'window\.chartData\s*=\s*(\[.*?\]);',r.text,re.DOTALL)
-                for blk in json_blks:
-                    try:
-                        data=json.loads(blk)
-                        result["page_data"]=data; break
-                    except: pass
-        except: pass
+        ]:
+            try:
+                r=requests.get(url,headers=HDRS,timeout=6)
+                if r.status_code==200:
+                    data=r.json()
+                    result={"source":"asx_api","data":data}
+                    break
+            except: pass
 
     return result
 
@@ -740,15 +784,33 @@ def render_rba_panel():
             st.markdown('<div class="data-panel"><div class="data-panel-title">ASX Rate Tracker</div>',
                        unsafe_allow_html=True)
             asx=ss._asx_data
-            if asx:
-                st.markdown('<div style="color:#30d996;font-size:0.82rem">Data retrieved</div>',
+            if asx and "futures_price" in asx:
+                fp_val=asx["futures_price"]
+                iy_val=round(100-fp_val,4)
+                src=asx.get("source","")
+                st.markdown(
+                    f'<div style="color:#30d996;font-size:0.82rem;font-weight:600">'
+                    f'IB Futures: {fp_val:.2f}</div>'
+                    f'<div style="color:#4a9af5;font-size:1.1rem;font-weight:700">Implied Rate: {iy_val:.2f}%</div>'
+                    f'<div style="color:#64748b;font-size:0.7rem">Source: {src}</div>',
+                    unsafe_allow_html=True)
+                if "probability" in asx:
+                    prob=asx["probability"]*100 if asx["probability"]<=1 else asx["probability"]
+                    st.markdown(
+                        f'<div style="color:#f5a94a;font-size:0.85rem;margin-top:4px">'
+                        f'Rate change probability: <strong>{prob:.1f}%</strong></div>',
+                        unsafe_allow_html=True)
+            elif asx:
+                st.markdown('<div style="color:#f5a94a;font-size:0.82rem">Partial data — enter price manually below</div>',
                            unsafe_allow_html=True)
             else:
                 st.markdown(
-                    '<div style="color:#64748b;font-size:0.78rem">ASX pages use JavaScript rendering — '
-                    'live data unavailable via direct fetch. Use the calculator below for probability estimates, '
-                    'or visit <a href="https://www.asx.com.au/markets/trade-our-derivatives-market/futures-market/rba-rate-tracker" '
-                    'target="_blank" style="color:#4a9af5">ASX RBA Rate Tracker</a></div>',
+                    '<div style="color:#64748b;font-size:0.78rem">Auto-fetch unavailable. '
+                    'Enter the IB futures price manually below, or visit '
+                    '<a href="https://www.asx.com.au/markets/trade-our-derivatives-market/futures-market/rba-rate-tracker" '
+                    'target="_blank" style="color:#4a9af5">ASX RBA Rate Tracker</a> '
+                    'or <a href="https://rba.isaacgross.net/" target="_blank" style="color:#4a9af5">rba.isaacgross.net</a>'
+                    '</div>',
                     unsafe_allow_html=True)
             st.markdown('</div>',unsafe_allow_html=True)
 
@@ -759,11 +821,15 @@ def render_rba_panel():
             'letter-spacing:.06em;margin-bottom:10px">ASX Target Rate Probability (30-Day Interbank Cash Rate Futures)</div>',
             unsafe_allow_html=True)
 
+        # Auto-populate IB price from fetched data if available
+        _asx=ss._asx_data
+        _default_ib=_asx.get("futures_price",95.65) if _asx else 95.65
+
         c1,c2,c3,c4=st.columns(4)
         with c1:
-            ib_price=st.number_input("IB Futures Price",value=95.65,min_value=90.0,max_value=100.0,
+            ib_price=st.number_input("IB Futures Price",value=float(_default_ib),min_value=90.0,max_value=100.0,
                                      step=0.01,format="%.2f",
-                                     help="30-Day Interbank Cash Rate Futures price from ASX (e.g. 95.65 → implied rate 4.35%)")
+                                     help="30-Day Interbank Cash Rate Futures price from ASX (e.g. 95.65 → implied rate 4.35%). Auto-populated if fetched above.")
             implied_yield=round(100-ib_price,4)
             computed("Implied Yield",fp(implied_yield),"= 100 − Futures Price")
         with c2:
@@ -1457,10 +1523,15 @@ def dash_balance(R):
                 hovertemplate=f"<b>{nm}</b><br>%{{x|%b %Y}}<br>$%{{y:,.0f}}<extra></extra>",
                 fill="tozeroy" if nm=="Proposed Split" else "none",
                 fillcolor="rgba(196,122,245,0.04)" if nm=="Proposed Split" else "rgba(0,0,0,0)"))
-    # Annotate reversion date
+    # Annotate reversion date — use add_shape to avoid Plotly date arithmetic bug
     rev_date=add_months(TODAY,ss.p_fix_yrs*12)
-    fig.add_vline(x=str(rev_date),line=dict(color=C_FIX,dash="dash",width=1),
-                  annotation_text="Fixed rate expires",annotation_font=dict(color=C_FIX,size=10))
+    rev_str=str(rev_date)
+    fig.add_shape(type="line",x0=rev_str,x1=rev_str,y0=0,y1=1,yref="paper",
+                  xref="x",line=dict(color=C_FIX,dash="dash",width=1))
+    fig.add_annotation(x=rev_str,y=0.97,yref="paper",xref="x",
+                       text="Fixed rate expires",showarrow=False,
+                       font=dict(color=C_FIX,size=10),
+                       bgcolor=C_PAPER,bordercolor=C_FIX,borderwidth=1)
     fig.update_layout(**PLOT_BASE,title="Outstanding Balance Over Time",yaxis_title="Balance ($)")
     fig.update_xaxes(rangeslider=dict(visible=True,thickness=0.04))
     st.plotly_chart(fig,use_container_width=True)
@@ -1472,10 +1543,16 @@ def dash_balance(R):
         fig2.add_trace(go.Scatter(x=df_ps["Date"],y=lvr,name="LVR (%)",
             line=dict(color=C_SPLIT,width=2),fill="tozeroy",fillcolor="rgba(196,122,245,0.07)",
             hovertemplate="%{x|%b %Y}<br>LVR: %{y:.1f}%<extra></extra>"))
-        fig2.add_hline(y=80,line=dict(color=C_FIX,dash="dash",width=1),
-                       annotation_text="80% — LMI threshold",annotation_font=dict(color=C_FIX,size=10))
-        fig2.add_hline(y=60,line=dict(color=C_VAR,dash="dot",width=1),
-                       annotation_text="60%",annotation_font=dict(color=C_VAR,size=10))
+        fig2.add_shape(type="line",x0=0,x1=1,xref="paper",y0=80,y1=80,
+                       line=dict(color=C_FIX,dash="dash",width=1))
+        fig2.add_annotation(x=1,xref="paper",y=80,yref="y",text="80% — LMI threshold",
+                            showarrow=False,font=dict(color=C_FIX,size=10),
+                            xanchor="right",yanchor="bottom")
+        fig2.add_shape(type="line",x0=0,x1=1,xref="paper",y0=60,y1=60,
+                       line=dict(color=C_VAR,dash="dot",width=1))
+        fig2.add_annotation(x=1,xref="paper",y=60,yref="y",text="60%",
+                            showarrow=False,font=dict(color=C_VAR,size=10),
+                            xanchor="right",yanchor="bottom")
         fig2.update_layout(**PLOT_BASE,title="LVR Over Time — Proposed Split",yaxis_title="LVR (%)")
         st.plotly_chart(fig2,use_container_width=True)
 
