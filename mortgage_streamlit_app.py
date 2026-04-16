@@ -1377,6 +1377,7 @@ def dash_overview(R):
                 if v is None: continue
                 # Build diff string vs previous column
                 diff_str=""
+                dpos=True  # default; only meaningful when ci>0
                 if ci>0:
                     v_prev=vals[f][0]  # vs original
                     if v_prev and v_prev!=0:
@@ -1388,7 +1389,6 @@ def dash_overview(R):
                             pct=diff/v_prev*100
                             diff_str=f"{'−' if diff<0 else '+'}${abs(diff):,.0f} ({abs(pct):.1f}%) vs Orig"
                             dpos=diff<0  # less interest/cost is positive for user
-                    else: dpos=True
                 dformat=fc(v) if f!="term" else f"{v} mo / {v/12:.1f} yr"
                 st.markdown(metric_card(flbl,dformat,diff_str,dpos,diff_neutral=(ci==0)),
                             unsafe_allow_html=True)
