@@ -1,241 +1,264 @@
 import streamlit as st
-import numpy as np
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 
 st.set_page_config(layout="wide")
 
 # =========================
-# UTILITIES
+# DATE HANDLING
 # =========================
 
-def parse_date(date_str):
+def parse_date(d):
     try:
-        return datetime.strptime(date_str, "%d/%m/%Y")
+        return datetime.strptime(d, "%d/%m/%Y")
     except:
         return None
 
-def monthly_dates(start_date, months):
+def month_range(start, end):
     dates = []
-    current = start_date
-    for _ in range(months):
+    current = start
+    while current <= end:
         dates.append(current)
         next_month = current.month + 1
-        year = current.year + (next_month - 1) // 12
-        month = ((next_month - 1) % 12) + 1
+        year = current.year + (next_month - 1)//12
+        month = ((next_month - 1)%12) + 1
         current = current.replace(year=year, month=month)
     return dates
 
-def monthly_payment(principal, rate, months):
-    if rate == 0:
-        return principal / months
-    r = rate / 12
-    return principal * (r * (1 + r)**months) / ((1 + r)**months - 1)
-
 # =========================
-# CORE AMORTISATION ENGINE
+# EVENT SYSTEM
 # =========================
 
-def amortisation_schedule(
-    loan_amount,
+class Event:
+    def __init__(self, date, type, value):
+        self.date = date
+        self.type = type
+        self.value = value
+
+# =========================
+# ENGINE
+# =========================
+
+def simulate_loan(
+    start_date,
+    loan,
     rate,
-    months,
-    offset=0,
-    monthly_offset_add=0,
-    monthly_fee=0
+    term,
+    offset,
+    events,
+    monthly_payment=None
 ):
-    balance = loan_amount
-    schedule = []
 
-    payment = monthly_payment(loan_amount, rate, months)
+    months = term
+    dates = [start_date + pd.DateOffset(months=i) for i in range(months)]
 
-    for m in range(months):
-        net_balance = max(balance - offset, 0)
+    balance = loan
+    current_rate = rate
+    current_offset = offset
 
-        interest = net_balance * rate / 12
-        principal = payment - interest
+    if monthly_payment is None:
+        r = rate/12
+        monthly_payment = loan * (r*(1+r)**term)/((1+r)**term -1)
 
-        balance = balance + interest - payment
-        offset += monthly_offset_add
+    results = []
 
-        schedule.append({
-            "Month": m+1,
+    for i, d in enumerate(dates):
+
+        # Apply events
+        for e in events:
+            if e.date == d:
+                if e.type == "rate":
+                    current_rate = e.value
+                if e.type == "offset":
+                    current_offset += e.value
+
+        # DAILY INTEREST → MONTHLY
+        days = 30
+        net_balance = max(balance - current_offset, 0)
+
+        interest = net_balance * current_rate * days/365
+
+        balance += interest
+
+        principal = monthly_payment - interest
+        balance -= monthly_payment
+
+        results.append({
+            "Date": d,
+            "Balance": max(balance,0),
             "Interest": interest,
             "Principal": principal,
-            "Balance": max(balance, 0),
-            "Offset": offset,
-            "Payment": payment + monthly_fee
+            "Payment": monthly_payment,
+            "Rate": current_rate,
+            "Offset": current_offset
         })
 
         if balance <= 0:
             break
 
-    return pd.DataFrame(schedule)
+    return pd.DataFrame(results)
 
 # =========================
 # OPTIMISER
 # =========================
 
-def optimise_split(loan, var_rate, fix_rate, months):
-    results = []
+def optimise_split(loan, var_rate, fix_rate, term, start_date):
 
-    for ratio in np.arange(0, 1.01, 0.01):
-        var_part = loan * ratio
-        fix_part = loan * (1 - ratio)
+    best = None
+    best_ratio = 0
+    curve = []
 
-        var_sched = amortisation_schedule(var_part, var_rate, months)
-        fix_sched = amortisation_schedule(fix_part, fix_rate, months)
+    for r in np.arange(0,1.01,0.01):
 
-        total_interest = var_sched["Interest"].sum() + fix_sched["Interest"].sum()
-        results.append((ratio, total_interest))
+        var = simulate_loan(start_date, loan*r, var_rate, term, 0, [])
+        fix = simulate_loan(start_date, loan*(1-r), fix_rate, term, 0, [])
 
-    df = pd.DataFrame(results, columns=["Ratio", "Interest"])
-    best = df.loc[df["Interest"].idxmin()]
+        total = var["Interest"].sum() + fix["Interest"].sum()
 
-    return best["Ratio"], df
+        curve.append((r,total))
+
+        if best is None or total < best:
+            best = total
+            best_ratio = r
+
+    df = pd.DataFrame(curve, columns=["Ratio","Interest"])
+
+    return best_ratio, df
 
 # =========================
-# UI — INPUTS
+# UI
 # =========================
 
-st.title("🏠 Advanced Mortgage Optimisation Dashboard")
+st.title("🏠 Full Mortgage Optimisation Engine")
 
 with st.sidebar:
 
     st.header("Original Loan")
 
-    orig_amount = st.number_input("Loan Amount", 0.0, 30000000.0, 500000.0)
-    orig_rate = st.number_input("Interest Rate (%)", 0.0, 20.0, 5.5) / 100
-    orig_term = st.number_input("Term (months)", 1, 600, 360)
-    orig_offset = st.number_input("Offset Amount", 0.0, 10000000.0, 0.0)
-    orig_offset_add = st.number_input("Monthly Offset Add", 0.0, 100000.0, 0.0)
+    start_date_str = st.text_input("Start Date (DD/MM/YYYY)", "01/01/2024")
+    start_date = parse_date(start_date_str)
+
+    loan = st.number_input("Loan Amount", 0.0, 30000000.0, 800000.0)
+
+    rate = st.number_input("Interest (%)", 0.0, 20.0, 6.0)/100
+
+    term = st.number_input("Term (months)", 1, 600, 360)
+
+    offset = st.number_input("Offset", 0.0, 10000000.0, 0.0)
+
+    st.header("Rate Changes")
+
+    num_changes = st.number_input("Number of Changes", 0, 15, 0)
+
+    events = []
+
+    for i in range(num_changes):
+        d = st.text_input(f"Date {i}", f"01/01/202{i+5}")
+        r = st.number_input(f"Rate {i} (%)", 0.0, 20.0, 6.0, key=i)/100
+        events.append(Event(parse_date(d), "rate", r))
 
     st.header("Proposed Loan")
 
-    new_rate_var = st.number_input("Variable Rate (%)", 0.0, 20.0, 6.0) / 100
-    new_rate_fix = st.number_input("Fixed Rate (%)", 0.0, 20.0, 5.5) / 100
+    var_rate = st.number_input("Variable Rate (%)", 0.0, 20.0, 6.5)/100
+    fix_rate = st.number_input("Fixed Rate (%)", 0.0, 20.0, 5.5)/100
 
-    strategy = st.selectbox(
-        "Strategy",
-        ["Conservative", "Balanced", "Aggressive"]
-    )
+    st.header("Scenario")
 
-    rba_change = st.number_input("RBA Change (%)", -5.0, 5.0, 0.5) / 100
+    rba_change = st.number_input("RBA Change (%)", -5.0, 5.0, 0.5)/100
 
 # =========================
-# CALCULATIONS
+# VALIDATION
 # =========================
 
-baseline = amortisation_schedule(
-    orig_amount,
-    orig_rate,
-    orig_term,
-    orig_offset,
-    orig_offset_add
-)
+if start_date is None:
+    st.error("Invalid start date")
+    st.stop()
 
-opt_ratio, opt_curve = optimise_split(
-    orig_amount,
-    new_rate_var,
-    new_rate_fix,
-    orig_term
-)
+for e in events:
+    if e.date < start_date:
+        st.error("Error: rate change before loan start")
+        st.stop()
 
-var_sched = amortisation_schedule(
-    orig_amount * opt_ratio,
-    new_rate_var,
-    orig_term
-)
+# =========================
+# RUN ENGINE
+# =========================
 
-fix_sched = amortisation_schedule(
-    orig_amount * (1 - opt_ratio),
-    new_rate_fix,
-    orig_term
-)
+baseline = simulate_loan(start_date, loan, rate, term, offset, events)
+
+opt_ratio, curve = optimise_split(loan, var_rate, fix_rate, term, start_date)
+
+var = simulate_loan(start_date, loan*opt_ratio, var_rate, term, 0, [])
+fix = simulate_loan(start_date, loan*(1-opt_ratio), fix_rate, term, 0, [])
 
 # =========================
 # DASHBOARD
 # =========================
 
-st.header("📊 Analysis Dashboard")
+st.header("📊 Dashboard")
 
 col1, col2, col3 = st.columns(3)
 
-baseline_cost = baseline["Payment"].sum()
-new_cost = var_sched["Payment"].sum() + fix_sched["Payment"].sum()
+base_cost = baseline["Payment"].sum()
+new_cost = var["Payment"].sum() + fix["Payment"].sum()
 
-col1.metric("Baseline Cost", f"${baseline_cost:,.0f}")
+col1.metric("Baseline Cost", f"${base_cost:,.0f}")
 col2.metric("New Cost", f"${new_cost:,.0f}")
-col3.metric("Savings", f"${baseline_cost - new_cost:,.0f}")
+col3.metric("Savings", f"${base_cost-new_cost:,.0f}")
 
 # =========================
-# MONTHLY GRAPH
+# MONTHLY
 # =========================
 
 st.subheader("Monthly Payments")
 
 fig = go.Figure()
 
-fig.add_trace(go.Scatter(
-    y=baseline["Payment"],
-    name="Baseline Monthly Payment"
-))
-
-fig.add_trace(go.Scatter(
-    y=var_sched["Payment"],
-    name="Variable Component"
-))
-
-fig.add_trace(go.Scatter(
-    y=fix_sched["Payment"],
-    name="Fixed Component"
-))
+fig.add_trace(go.Scatter(x=baseline["Date"], y=baseline["Payment"], name="Baseline"))
+fig.add_trace(go.Scatter(x=var["Date"], y=var["Payment"], name="Variable"))
+fig.add_trace(go.Scatter(x=fix["Date"], y=fix["Payment"], name="Fixed"))
 
 st.plotly_chart(fig, use_container_width=True)
 
 # =========================
-# CUMULATIVE GRAPH
+# CUMULATIVE
 # =========================
 
 st.subheader("Cumulative Cost")
 
-baseline_cum = baseline["Payment"].cumsum()
-new_cum = (var_sched["Payment"].cumsum() + fix_sched["Payment"].cumsum())
-
 fig2 = go.Figure()
 
 fig2.add_trace(go.Scatter(
-    y=baseline_cum,
-    name="Baseline Total Cost"
+    x=baseline["Date"],
+    y=baseline["Payment"].cumsum(),
+    name="Baseline"
 ))
 
 fig2.add_trace(go.Scatter(
-    y=new_cum,
-    name="New Total Cost"
+    x=var["Date"],
+    y=var["Payment"].cumsum() + fix["Payment"].cumsum(),
+    name="New"
 ))
 
 st.plotly_chart(fig2, use_container_width=True)
 
 # =========================
-# OPTIMISATION CURVE
+# OPT CURVE
 # =========================
 
-st.subheader("Optimal Split Ratio Curve")
+st.subheader("Optimisation Curve")
 
 fig3 = go.Figure()
 
 fig3.add_trace(go.Scatter(
-    x=opt_curve["Ratio"] * 100,
-    y=opt_curve["Interest"],
-    name="Interest vs Split Ratio"
+    x=curve["Ratio"]*100,
+    y=curve["Interest"],
+    name="Interest"
 ))
 
-fig3.add_vline(
-    x=opt_ratio * 100,
-    line_dash="dash"
-)
+fig3.add_vline(x=opt_ratio*100)
 
 st.plotly_chart(fig3, use_container_width=True)
 
-st.write(f"Optimal Split Ratio: {opt_ratio*100:.2f}% variable")
+st.write(f"Optimal Split: {opt_ratio*100:.2f}% variable")
