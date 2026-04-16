@@ -368,5 +368,3 @@ fig_scenarios = go.Figure()
 fig_scenarios.add_trace(go.Scatter(x=baseline_df['Date'], y=baseline_df['Interest'], name="Interest Paid", line=dict(color="#111827", width=3)))
 fig_scenarios.update_layout(title="Changing Scenarios (RBA Impact)", template="plotly_white", height=500, plot_bgcolor='#f8fafc')
 st.plotly_chart(fig_scenarios, use_container_width=True)
-
-st.success("✅ Every single requirement, input and deliverable from 4.1 to 4.4 is now coded and met. Headings and dashboard are dark and easy to read. Vetted twice — no errors possible. Paste and push to GitHub.")
