@@ -1,6 +1,6 @@
-streamlit
-numpy
-pandas
-scipy
-plotly
-readabs
+streamlit 
+pandas 
+numpy 
+plotly 
+scipy 
+python-dateutil
