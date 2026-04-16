@@ -821,9 +821,8 @@ def render_rba_panel():
                 name="Cash Rate Target", line=dict(color=C_ORIG,width=2,shape="hv"),
                 fill="tozeroy",fillcolor="rgba(74,154,245,0.06)",
                 hovertemplate="<b>%{y:.2f}%</b><br>%{x|%d %b %Y}<extra></extra>"))
-            fig.update_layout(**PLOT_BASE,title="RBA Cash Rate History",
-                              yaxis_title="Rate (%)",
-                              xaxis=dict(**PLOT_BASE["xaxis"],rangeslider=dict(visible=True,thickness=0.04)))
+            fig.update_layout(**PLOT_BASE,title="RBA Cash Rate History",yaxis_title="Rate (%)")
+            fig.update_xaxes(rangeslider=dict(visible=True,thickness=0.04))
             st.plotly_chart(fig,use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1422,8 +1421,8 @@ def dash_payments(R):
             fig.add_trace(go.Scatter(x=df["Date"],y=df["Payment"],name=nm,
                 line=dict(color=clr,width=2,dash=dash),
                 hovertemplate=f"<b>{nm}</b><br>%{{x|%b %Y}}<br>$%{{y:,.0f}}/mo<extra></extra>"))
-    fig.update_layout(**PLOT_BASE,title="Monthly Repayments",yaxis_title="Repayment ($)",
-                      xaxis=dict(**PLOT_BASE["xaxis"],rangeslider=dict(visible=True,thickness=0.04)))
+    fig.update_layout(**PLOT_BASE,title="Monthly Repayments",yaxis_title="Repayment ($)")
+    fig.update_xaxes(rangeslider=dict(visible=True,thickness=0.04))
     st.plotly_chart(fig,use_container_width=True)
 
     if df_ps is not None and not df_ps.empty:
@@ -1462,8 +1461,8 @@ def dash_balance(R):
     rev_date=add_months(TODAY,ss.p_fix_yrs*12)
     fig.add_vline(x=str(rev_date),line=dict(color=C_FIX,dash="dash",width=1),
                   annotation_text="Fixed rate expires",annotation_font=dict(color=C_FIX,size=10))
-    fig.update_layout(**PLOT_BASE,title="Outstanding Balance Over Time",yaxis_title="Balance ($)",
-                      xaxis=dict(**PLOT_BASE["xaxis"],rangeslider=dict(visible=True,thickness=0.04)))
+    fig.update_layout(**PLOT_BASE,title="Outstanding Balance Over Time",yaxis_title="Balance ($)")
+    fig.update_xaxes(rangeslider=dict(visible=True,thickness=0.04))
     st.plotly_chart(fig,use_container_width=True)
 
     curr_val=ss.c_prop_val if not ss.c_is_cont else ss.o_prop_val
@@ -1488,8 +1487,8 @@ def dash_interest(R):
             fig.add_trace(go.Scatter(x=df["Date"],y=df["Cum Interest"],name=nm,
                 line=dict(color=clr,width=2),
                 hovertemplate=f"<b>{nm}</b><br>%{{x|%b %Y}}<br>$%{{y:,.0f}} cumulative<extra></extra>"))
-    fig.update_layout(**PLOT_BASE,title="Cumulative Interest Paid",yaxis_title="Cumulative Interest ($)",
-                      xaxis=dict(**PLOT_BASE["xaxis"],rangeslider=dict(visible=True,thickness=0.04)))
+    fig.update_layout(**PLOT_BASE,title="Cumulative Interest Paid",yaxis_title="Cumulative Interest ($)")
+    fig.update_xaxes(rangeslider=dict(visible=True,thickness=0.04))
     st.plotly_chart(fig,use_container_width=True)
 
     # Waterfall — difference between Current and Proposed
@@ -1679,9 +1678,8 @@ def dash_scenarios(R):
                 line=dict(color=clr,width=2 if lbl=="Base" else 1.5,
                           dash="solid" if lbl=="Base" else "dash"),
                 hovertemplate=f"<b>{lbl}</b><br>%{{x|%b %Y}}<br>$%{{y:,.0f}}/mo<extra></extra>"))
-    fig_pmt.update_layout(**PLOT_BASE,title="Monthly Repayments — Rate Scenarios",
-                          yaxis_title="Monthly Repayment ($)",
-                          xaxis=dict(**PLOT_BASE["xaxis"],rangeslider=dict(visible=True,thickness=0.04)))
+    fig_pmt.update_layout(**PLOT_BASE,title="Monthly Repayments — Rate Scenarios",yaxis_title="Monthly Repayment ($)")
+    fig_pmt.update_xaxes(rangeslider=dict(visible=True,thickness=0.04))
     st.plotly_chart(fig_pmt,use_container_width=True)
 
     fig_bal=go.Figure()
@@ -1692,9 +1690,8 @@ def dash_scenarios(R):
                 line=dict(color=clr,width=2 if lbl=="Base" else 1.5,
                           dash="solid" if lbl=="Base" else "dash"),
                 hovertemplate=f"<b>{lbl}</b><br>%{{x|%b %Y}}<br>$%{{y:,.0f}}<extra></extra>"))
-    fig_bal.update_layout(**PLOT_BASE,title="Outstanding Balance — Rate Scenarios",
-                          yaxis_title="Balance ($)",
-                          xaxis=dict(**PLOT_BASE["xaxis"],rangeslider=dict(visible=True,thickness=0.04)))
+    fig_bal.update_layout(**PLOT_BASE,title="Outstanding Balance — Rate Scenarios",yaxis_title="Balance ($)")
+    fig_bal.update_xaxes(rangeslider=dict(visible=True,thickness=0.04))
     st.plotly_chart(fig_bal,use_container_width=True)
 
 def dash_schedules(R):
