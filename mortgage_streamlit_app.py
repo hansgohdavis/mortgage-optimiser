@@ -1879,540 +1879,735 @@ def compute_all():
     }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DASHBOARD
+# FORENSIC ANALYSIS DASHBOARD — 5 Themes (I–V) per Gemini-style audit framework
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def dash_overview(R):
+def _tier(value, tiers):
+    """Given value and list of (threshold, label, colour) tuples sorted ascending
+       by threshold, return the (label, colour) for the first threshold v <= thr."""
+    for thr, lbl, clr in tiers:
+        if value <= thr:
+            return lbl, clr
+    return tiers[-1][1], tiers[-1][2]
+
+def _days_saved_snowball(df_curr, df_proposed):
+    """Months saved when maintain-payment=True (proposed amortised at higher of
+       (proposed min pmt, current pmt))."""
+    if df_curr is None or df_curr.empty: return 0
+    if df_proposed is None or df_proposed.empty: return 0
+    return max(0, len(df_curr) - len(df_proposed))
+
+def forensic_compute(R):
+    """Compute every metric the 5 themes need, in one pass, using ONLY
+       existing session-state inputs + the compute_all() outputs."""
     ss = st.session_state
-    dfs = [R["df_orig"], R["df_curr"], R["df_ps"]]
-    labels = ["Original Loan", "Current Loan", "Proposed (Split)"]
-    colors = [C_ORIG, C_CURR, C_SPLIT]
-
-    def val(df, field):
-        if df is None or df.empty: return None
-        if field == "payment":
-            # Use first forward-looking row (Date >= today) so the RBA scenario
-            # visibly affects the Monthly Payment metric for Original/Current
-            # (which may have started in the past). Falls back to iloc[0].
-            try:
-                # Date column holds datetime.date objects; use apply for robust comparison
-                mask = df["Date"].apply(lambda d: d >= TODAY)
-                fwd = df[mask]
-                if not fwd.empty:
-                    return fwd["Payment"].iloc[0]
-            except Exception:
-                pass
-            return df["Payment"].iloc[0]
-        if field == "int": return df["Cum Interest"].iloc[-1]
-        if field == "cost": return df["Cum Paid"].iloc[-1]
-        if field == "term": return len(df)
-
-    fields = [("payment", "Monthly Payment"), ("int", "Total Interest"),
-              ("cost", "Total Cost"), ("term", "Loan Term")]
-
-    # Collect values for each (field, loan)
-    values = {f: [val(df, f) for df in dfs] for f, _ in fields}
-
-    cols = st.columns(3)
-    for ci, (col, df, lbl, clr) in enumerate(zip(cols, dfs, labels, colors)):
-        with col:
-            if df is None or df.empty:
-                st.info(f"No data for {lbl}"); continue
-            st.markdown(
-                f'<div style="color:{clr};font-weight:600;font-size:0.8rem;'
-                f'margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid #1e2d4a">{lbl}</div>',
-                unsafe_allow_html=True)
-            for f, flbl in fields:
-                v = val(df, f)
-                if v is None: continue
-                # Build diffs
-                diff_orig = ""
-                diff_curr = ""
-                dpos_orig = True
-                dpos_curr = True
-                if ci >= 1:  # Current or Proposed → show vs Original
-                    v0 = values[f][0]
-                    if v0 is not None and v0 != 0:
-                        d = v - v0
-                        if f == "term":
-                            diff_orig = f"{'−' if d<0 else '+'}{abs(int(d))} mo vs Orig"
-                            dpos_orig = d < 0
-                        else:
-                            pct = d / v0 * 100
-                            diff_orig = f"{'−' if d<0 else '+'}${abs(d):,.0f} ({abs(pct):.1f}%) vs Orig"
-                            dpos_orig = d < 0
-                if ci == 2:  # Proposed → ALSO show vs Current
-                    v1 = values[f][1]
-                    if v1 is not None and v1 != 0:
-                        d = v - v1
-                        if f == "term":
-                            diff_curr = f"{'−' if d<0 else '+'}{abs(int(d))} mo vs Curr"
-                            dpos_curr = d < 0
-                        else:
-                            pct = d / v1 * 100
-                            diff_curr = f"{'−' if d<0 else '+'}${abs(d):,.0f} ({abs(pct):.1f}%) vs Curr"
-                            dpos_curr = d < 0
-
-                dformat = fc(v) if f != "term" else f"{v} mo / {v/12:.1f} yr"
-                # Render: primary is diff vs Orig (or blank), sub is diff vs Curr (Proposed only)
-                if ci == 0:
-                    st.markdown(metric_card(flbl, dformat, "", True, diff_neutral=True),
-                                unsafe_allow_html=True)
-                elif ci == 1:
-                    st.markdown(metric_card(flbl, dformat, diff_orig, dpos_orig),
-                                unsafe_allow_html=True)
-                else:  # ci == 2
-                    # Show both vs Original AND vs Current
-                    st.markdown(metric_card(flbl, dformat, diff_orig, dpos_orig,
-                                             sub_diff=diff_curr if dpos_curr else f"{diff_curr}"),
-                                unsafe_allow_html=True)
-                    # Hack: metric_card doesn't distinguish sub_diff color independently;
-                    # re-render if needed. Actually metric_card handles it via separate CSS classes
-                    # — but we only pass one dpos flag. Let's render a second line manually:
-                    # (replace above with a custom rendering)
-
-    # Key metrics summary
-    df_c, df_s = R["df_curr"], R["df_ps"]
-    if df_c is not None and not df_c.empty and df_s is not None and not df_s.empty:
-        st.markdown("<hr>", unsafe_allow_html=True)
-        st.markdown("**Proposed vs Current — Key Metrics**")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        items = [
-            ("Interest Saved", fc(df_c["Cum Interest"].iloc[-1] - df_s["Cum Interest"].iloc[-1])),
-            ("Total Cost Saved", fc(df_c["Cum Paid"].iloc[-1] - df_s["Cum Paid"].iloc[-1])),
-            ("Optimal Fixed Split", fp(R["best_pct"], 1)),
-            ("Effective Var Rate", fp(R["eff_var"])),
-            ("ASIC Comparison Rate", fp(R["comp_var"])),
-        ]
-        for col, (lbl, vv) in zip([c1, c2, c3, c4, c5], items):
-            with col: st.markdown(metric_card(lbl, vv), unsafe_allow_html=True)
-
-def dash_payments(R):
-    df_o, df_c = R["df_orig"], R["df_curr"]
-    df_ps, df_pv, df_pf = R["df_ps"], R["df_pv"], R["df_pf"]
-    fig = go.Figure()
-    for df, nm, clr, dash in [(df_o, "Original", C_ORIG, "dot"),
-                               (df_c, "Current", C_CURR, "dash"),
-                               (df_ps, "Proposed Split", C_SPLIT, "solid"),
-                               (df_pv, "Variable Component", C_VAR, "dot"),
-                               (df_pf, "Fixed Component", C_FIX, "dot")]:
-        if df is not None and not df.empty:
-            fig.add_trace(go.Scatter(x=df["Date"], y=df["Payment"], name=nm,
-                line=dict(color=clr, width=2, dash=dash),
-                hovertemplate=f"<b>{nm}</b><br>%{{x|%b %Y}}<br>$%{{y:,.0f}}/mo<extra></extra>"))
-    fig.update_layout(**PLOT_BASE, title="Monthly Repayments", yaxis_title="Repayment ($)")
-    fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.04))
-    st.plotly_chart(fig, use_container_width=True)
-
-    if df_ps is not None and not df_ps.empty:
-        s = df_ps.iloc[::12]
-        fig2 = go.Figure()
-        fig2.add_trace(go.Bar(x=s["Date"], y=s["Principal"], name="Principal",
-                              marker_color=C_VAR,
-                              hovertemplate="Principal: $%{y:,.0f}<extra></extra>"))
-        fig2.add_trace(go.Bar(x=s["Date"], y=s["Interest"], name="Interest",
-                              marker_color=C_FIX,
-                              hovertemplate="Interest: $%{y:,.0f}<extra></extra>"))
-        if df_ps["Interest Saved"].sum() > 0:
-            fig2.add_trace(go.Scatter(x=s["Date"], y=s["Interest Saved"],
-                name="Interest Saved (Offset)", mode="lines+markers",
-                line=dict(color=C_ORIG, width=2), yaxis="y2",
-                hovertemplate="Saved: $%{y:,.0f}<extra></extra>"))
-            fig2.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False,
-                                           title="Saved ($)", color=C_ORIG,
-                                           tickfont=dict(color=C_ORIG)))
-        fig2.update_layout(**PLOT_BASE, barmode="stack",
-                           title="Annual Repayment Breakdown — Proposed Split",
-                           yaxis_title="Amount ($)")
-        st.plotly_chart(fig2, use_container_width=True)
-
-def dash_balance(R):
-    ss = st.session_state
-    df_o, df_c = R["df_orig"], R["df_curr"]
-    df_ps, df_pv, df_pf = R["df_ps"], R["df_pv"], R["df_pf"]
-    fig = go.Figure()
-    for df, nm, clr, dash in [(df_o, "Original", C_ORIG, "dot"),
-                               (df_c, "Current", C_CURR, "dash"),
-                               (df_ps, "Proposed Split", C_SPLIT, "solid"),
-                               (df_pv, "Variable Component", C_VAR, "dot"),
-                               (df_pf, "Fixed Component", C_FIX, "dot")]:
-        if df is not None and not df.empty:
-            fig.add_trace(go.Scatter(x=df["Date"], y=df["Closing Balance"], name=nm,
-                line=dict(color=clr, width=2, dash=dash),
-                hovertemplate=f"<b>{nm}</b><br>%{{x|%b %Y}}<br>$%{{y:,.0f}}<extra></extra>",
-                fill="tozeroy" if nm == "Proposed Split" else "none",
-                fillcolor="rgba(196,122,245,0.04)" if nm == "Proposed Split" else "rgba(0,0,0,0)"))
-    # Reversion date marker
-    rev_date = add_months(TODAY, ss.p_fix_yrs * 12)
-    rev_str = str(rev_date)
-    fig.add_shape(type="line", x0=rev_str, x1=rev_str, y0=0, y1=1, yref="paper",
-                  xref="x", line=dict(color=C_FIX, dash="dash", width=1))
-    fig.add_annotation(x=rev_str, y=0.97, yref="paper", xref="x",
-                       text="Fixed rate expires", showarrow=False,
-                       font=dict(color=C_FIX, size=10),
-                       bgcolor=C_PAPER, bordercolor=C_FIX, borderwidth=1)
-    fig.update_layout(**PLOT_BASE, title="Outstanding Balance Over Time",
-                      yaxis_title="Balance ($)")
-    fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.04))
-    st.plotly_chart(fig, use_container_width=True)
-
-    curr_val = ss.c_prop_val if not ss.c_is_cont else ss.o_prop_val
-    if curr_val > 0 and df_ps is not None and not df_ps.empty:
-        lvr = df_ps["Closing Balance"] / curr_val * 100
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=df_ps["Date"], y=lvr, name="LVR (%)",
-            line=dict(color=C_SPLIT, width=2),
-            fill="tozeroy", fillcolor="rgba(196,122,245,0.07)",
-            hovertemplate="%{x|%b %Y}<br>LVR: %{y:.1f}%<extra></extra>"))
-        fig2.add_shape(type="line", x0=0, x1=1, xref="paper", y0=80, y1=80,
-                       line=dict(color=C_FIX, dash="dash", width=1))
-        fig2.add_annotation(x=1, xref="paper", y=80, yref="y",
-                            text="80% — LMI threshold", showarrow=False,
-                            font=dict(color=C_FIX, size=10), xanchor="right", yanchor="bottom")
-        fig2.add_shape(type="line", x0=0, x1=1, xref="paper", y0=60, y1=60,
-                       line=dict(color=C_VAR, dash="dot", width=1))
-        fig2.add_annotation(x=1, xref="paper", y=60, yref="y",
-                            text="60%", showarrow=False,
-                            font=dict(color=C_VAR, size=10), xanchor="right", yanchor="bottom")
-        fig2.update_layout(**PLOT_BASE, title="LVR Over Time — Proposed Split",
-                           yaxis_title="LVR (%)")
-        st.plotly_chart(fig2, use_container_width=True)
-
-def dash_interest(R):
     df_o, df_c, df_ps = R["df_orig"], R["df_curr"], R["df_ps"]
-    fig = go.Figure()
-    for df, nm, clr in [(df_o, "Original", C_ORIG), (df_c, "Current", C_CURR),
-                        (df_ps, "Proposed Split", C_SPLIT)]:
-        if df is not None and not df.empty:
-            fig.add_trace(go.Scatter(x=df["Date"], y=df["Cum Interest"], name=nm,
-                line=dict(color=clr, width=2),
-                hovertemplate=f"<b>{nm}</b><br>%{{x|%b %Y}}<br>$%{{y:,.0f}}<extra></extra>"))
-    fig.update_layout(**PLOT_BASE, title="Cumulative Interest Paid",
-                      yaxis_title="Cumulative Interest ($)")
-    fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.04))
-    st.plotly_chart(fig, use_container_width=True)
+    df_pv, df_pf = R["df_pv"], R["df_pf"]
 
-    if df_c is not None and not df_c.empty and df_ps is not None and not df_ps.empty:
-        int_sav = df_c["Cum Interest"].iloc[-1] - df_ps["Cum Interest"].iloc[-1]
-        fee_diff = df_c["Fees"].sum() - df_ps["Fees"].sum()
-        fig2 = go.Figure(go.Waterfall(
-            orientation="h",
-            measure=["absolute", "relative", "relative", "total"],
-            x=[df_c["Cum Paid"].iloc[-1], -int_sav, -fee_diff, df_ps["Cum Paid"].iloc[-1]],
-            y=["Current Total Cost", "Interest Δ", "Fee Δ", "Proposed Total Cost"],
-            connector=dict(line=dict(color=C_GRID)),
-            decreasing=dict(marker=dict(color=C_VAR)),
-            increasing=dict(marker=dict(color=C_FIX)),
-            totals=dict(marker=dict(color=C_SPLIT)),
-            text=[fc(df_c["Cum Paid"].iloc[-1]), f"−{fc(abs(int_sav))}",
-                  f"−{fc(abs(fee_diff))}", fc(df_ps["Cum Paid"].iloc[-1])],
-            textposition="outside"))
-        fig2.update_layout(**PLOT_BASE, title="Cost Waterfall — Current vs Proposed",
-                           xaxis_title="Total Cost ($)")
-        st.plotly_chart(fig2, use_container_width=True)
+    rba_rate = ss._rba_rate if ss._rba_rate else 4.35  # sensible fallback
 
-    if df_ps is not None and not df_ps.empty and df_ps["Cum Interest Saved"].iloc[-1] > 1:
-        fig3 = go.Figure()
-        fig3.add_trace(go.Scatter(x=df_ps["Date"], y=df_ps["Cum Interest Saved"],
-            name="Cumulative Offset Savings", line=dict(color=C_VAR, width=2),
-            fill="tozeroy", fillcolor="rgba(48,217,150,0.08)",
-            hovertemplate="%{x|%b %Y}<br>Saved: $%{y:,.0f}<extra></extra>"))
-        fig3.update_layout(**PLOT_BASE, title="Cumulative Interest Saved via Offset Account",
-                           yaxis_title="Savings ($)")
-        st.plotly_chart(fig3, use_container_width=True)
+    # Current loan headline rate (after deltas to today)
+    if ss.c_is_cont:
+        c_rate = eff_rate_from_deltas(ss.o_rate, ss.o_rate_deltas, as_of=TODAY)
+        c_bal = ss.o_balance
+        c_fee_mo = ss.o_fee_mo
+        c_setup = 0.0
+        c_break = ss.o_fee_break
+        c_term_rem = max(0, ss.o_term_mo - months_between(ss.o_balance_date, TODAY))
+    else:
+        c_rate = ss.c_rate
+        c_bal = ss.c_balance
+        c_fee_mo = ss.c_fee_mo
+        c_setup = ss.c_fee_setup
+        c_break = 0.0
+        c_term_rem = ss.c_term_mo
 
-def dash_split(R):
-    """
-    Revamped Optimal Split visualisation.
-    Three clearer visuals: (1) objective curve with optimal, (2) stacked cost composition,
-    (3) compare key percentages bar chart.
-    """
-    ss = st.session_state
-    sdf = R["split_df"]
-    best = R["best_pct"]
+    # Proposed headline — weighted by split
+    best_pct = R["best_pct"]
+    p_blended_rate = (best_pct/100)*ss.p_adv_fix_rate + (1-best_pct/100)*ss.p_adv_var_rate
+    p_eff_var = R["eff_var"]
+    p_eff_fix = R["eff_fix"]
 
-    st.markdown(
-        f'<div class="note">Optimal fixed component: <strong>{best:.1f}%</strong> '
-        f'({100-best:.1f}% variable). Evaluated across 1,001 scenarios '
-        f'(0.0% → 100.0% in 0.1% steps) over the <strong>{ss.p_fix_yrs}-year</strong> '
-        f'fixed period. The objective surface is driven by the Fixed vs Variable rate '
-        f'differential; when one rate is clearly cheaper, the optimum sits at the '
-        f'corresponding extreme. The Fixed Period scales the magnitude of this '
-        f'differential — longer periods amplify the cost gap. Change "Fixed Period '
-        f'(years)" in the Proposed Loan section to see the curve reshape.</div>',
-        unsafe_allow_html=True)
+    # Offset balances (today)
+    off_curr = ss.c_off_init if not ss.c_is_cont else ss.o_off_init
+    off_prop = ss.p_off_init
 
-    # Summary metrics
-    p_f = ss.p_loan_amt * best / 100
-    p_v = ss.p_loan_amt * (100 - best) / 100
-    best_row = sdf.iloc[sdf["Objective"].idxmin()]
-    c1, c2, c3, c4 = st.columns(4)
-    with c1: st.markdown(metric_card("Optimal Fixed %", fp(best, 1)), unsafe_allow_html=True)
-    with c2: st.markdown(metric_card("Fixed Amount", fc(p_f)), unsafe_allow_html=True)
-    with c3: st.markdown(metric_card("Variable Amount", fc(p_v)), unsafe_allow_html=True)
-    with c4: st.markdown(metric_card("Min Objective", fc(best_row["Objective"])),
-                         unsafe_allow_html=True)
+    # ── THEME I: Spread & Proximity ──────────────────────────────────────
+    # Current effective rate (after offset): net_debt × rate ÷ gross_debt
+    def effective_rate_after_offset(rate_pct, loan, offset):
+        if loan <= 0: return rate_pct
+        net = max(0, loan - offset)
+        return rate_pct * (net / loan)
 
-    # ── Chart 1: Objective curve with best-fit polynomial overlay & nadir marker ──
-    fig1 = go.Figure()
-    # Raw data points
-    fig1.add_trace(go.Scatter(
-        x=sdf["Fixed %"], y=sdf["Objective"],
-        name="Total Cost (1,001 points)",
-        line=dict(color=C_SPLIT, width=2.5),
-        fill="tozeroy", fillcolor="rgba(196,122,245,0.08)",
-        hovertemplate="Fixed: %{x:.1f}%<br>Total: $%{y:,.0f}<extra></extra>"))
-    # Polynomial best-fit (cubic or quartic captures U-shape without overfitting)
+    curr_eff_after_off = effective_rate_after_offset(c_rate, c_bal, off_curr)
+    prop_eff_after_off = effective_rate_after_offset(p_blended_rate, ss.p_loan_amt, off_prop)
+    curr_spread_bps = (c_rate - rba_rate) * 100
+    prop_spread_bps = (p_blended_rate - rba_rate) * 100
+    curr_eff_spread_bps = (curr_eff_after_off - rba_rate) * 100
+    prop_eff_spread_bps = (prop_eff_after_off - rba_rate) * 100
+
+    # Tiers for spread classification (bps above RBA)
+    SPREAD_TIERS = [
+        (100,  "Elite",       "#30d996"),
+        (170,  "Competitive", "#4a9af5"),
+        (220,  "Market",      "#f5a94a"),
+        (270,  "Expensive",   "#e94560"),
+        (9999, "Very Expensive", "#e94560"),
+    ]
+    curr_tier = _tier(curr_spread_bps, SPREAD_TIERS)
+    prop_tier = _tier(prop_spread_bps, SPREAD_TIERS)
+    curr_eff_tier = _tier(curr_eff_spread_bps, SPREAD_TIERS)
+    prop_eff_tier = _tier(prop_eff_spread_bps, SPREAD_TIERS)
+
+    # Annual interest at proposed effective rate
+    prop_annual_interest = max(0, ss.p_loan_amt - off_prop) * p_blended_rate / 100
+
+    # ── THEME II: Strategy Stress-Test ──────────────────────────────────
+    # Run three configurations over the fixed period (or 24 months whichever shorter)
+    horizon_mo = min(ss.p_fix_yrs * 12, ss.p_term_mo)
+
+    def stress_interest(pct_fixed, with_offset, fix_rate, var_rate, fix_period_mo,
+                          full_term_mo, horizon):
+        """Return cumulative interest over `horizon` months for a given config."""
+        loan = ss.p_loan_amt
+        p_f = loan * pct_fixed / 100
+        p_v = loan * (1 - pct_fixed / 100)
+        # Fixed side: no offset (offset lives on variable side only)
+        bf, cif = fast_partial(p_f, fix_rate, full_term_mo,
+                               min(horizon, fix_period_mo)) if p_f > 0 else (0, 0)
+        # Variable side: optionally with offset benefit
+        if p_v > 0:
+            bv, civ = fast_partial(p_v, var_rate, full_term_mo, horizon)
+            if with_offset and off_prop > 0:
+                # Estimate offset interest saving over horizon
+                avg_net_v = max(0, (p_v + bv) / 2 - off_prop)
+                avg_gross_v = max(1, (p_v + bv) / 2)
+                civ = civ * (avg_net_v / avg_gross_v)
+        else:
+            civ = 0
+        return cif + civ
+
+    scen_split = stress_interest(best_pct/100, True, ss.p_adv_fix_rate, ss.p_adv_var_rate,
+                                  ss.p_fix_yrs*12, ss.p_term_mo, horizon_mo)
+    scen_var_off = stress_interest(0.0, True, ss.p_adv_fix_rate, ss.p_adv_var_rate,
+                                    ss.p_fix_yrs*12, ss.p_term_mo, horizon_mo)
+    scen_all_fix = stress_interest(1.0, False, ss.p_adv_fix_rate, ss.p_adv_var_rate,
+                                    ss.p_fix_yrs*12, ss.p_term_mo, horizon_mo)
+    # The "Offset Disaster" delta
+    disaster_cost = scen_all_fix - scen_split
+    freedom_cost = scen_var_off - scen_split
+
+    # ── THEME III: Execution — Break-even ─────────────────────────────────
+    # Current vs Proposed monthly payment (forward-looking)
+    def fwd_pmt(df):
+        if df is None or df.empty: return 0.0
+        mask = df["Date"].apply(lambda d: d >= TODAY)
+        fwd = df[mask]
+        return fwd["Payment"].iloc[0] if not fwd.empty else df["Payment"].iloc[0]
+
+    curr_pmt = fwd_pmt(df_c)
+    prop_pmt = fwd_pmt(df_ps)
+    monthly_saving = curr_pmt - prop_pmt
+    # Switching costs: proposed setup + breakage on current (if continuation, use original break)
+    switch_cost = (ss.p_var_fee_setup + ss.p_fix_fee_setup
+                   + ss.p_var_fee_other + ss.p_fix_fee_other
+                   + c_break)
+    if monthly_saving > 1:
+        break_even_mo = switch_cost / monthly_saving
+    else:
+        break_even_mo = float("inf")
+
+    # ── THEME IV: Life-of-Loan Snowball ──────────────────────────────────
+    total_int_curr = df_c["Cum Interest"].iloc[-1] if (df_c is not None and not df_c.empty) else 0
+    total_int_prop = df_ps["Cum Interest"].iloc[-1] if (df_ps is not None and not df_ps.empty) else 0
+    lifetime_saving = total_int_curr - total_int_prop
+    months_snowball = _days_saved_snowball(df_c, df_ps)
+
+    # Recompute scenario: same proposed BUT floor payment at current payment
+    # to show the true snowball
+    snowball_months_saved = 0
+    snowball_interest_saved = 0
     try:
-        x = sdf["Fixed %"].values
-        y = sdf["Objective"].values
-        # Try quartic fit; if the curve is nearly linear (e.g. rates barely differ),
-        # fall back to quadratic
-        coeffs = np.polyfit(x, y, 4)
-        y_fit = np.polyval(coeffs, x)
-        # Find fitted nadir (derivative = 0 within [0, 100])
-        deriv = np.polyder(coeffs)
-        roots = np.roots(deriv)
-        real_roots = [r.real for r in roots if abs(r.imag) < 1e-6 and 0 <= r.real <= 100]
-        fit_nadir_pct = None
-        if real_roots:
-            # Pick root where second derivative > 0 (minimum)
-            d2 = np.polyder(deriv)
-            minima = [r for r in real_roots if np.polyval(d2, r) > 0]
-            if minima:
-                fit_nadir_pct = min(minima, key=lambda r: np.polyval(coeffs, r))
-        fig1.add_trace(go.Scatter(
-            x=x, y=y_fit, name="Best-fit curve (quartic)",
-            line=dict(color=C_ORIG, width=1.5, dash="dot"),
-            hovertemplate="Fixed: %{x:.1f}%<br>Fit: $%{y:,.0f}<extra></extra>"))
-        if fit_nadir_pct is not None:
-            fig1.add_trace(go.Scatter(
-                x=[fit_nadir_pct], y=[np.polyval(coeffs, fit_nadir_pct)],
-                mode="markers", marker=dict(symbol="circle-open", size=14,
-                                            color=C_ORIG, line=dict(width=2)),
-                name=f"Fitted nadir: {fit_nadir_pct:.1f}%",
-                hovertemplate="Fitted nadir<br>Fixed: %{x:.1f}%<extra></extra>"))
+        if curr_pmt > prop_pmt and ss.p_loan_amt > 0:
+            p_var_deltas = list(ss.future_var_deltas)
+            vsched = build_rate_schedule(ss.p_adv_var_rate, p_var_deltas)
+            df_snow = amortize(ss.p_loan_amt, ss.p_start_date, ss.p_term_mo,
+                               vsched, off_prop, ss.p_off_monthly,
+                               deltas_to_lumps_t(ss.p_off_lumps, ss.p_start_date),
+                               deltas_to_lumps_t(ss.p_extra_repay, ss.p_start_date),
+                               ss.p_var_fee_mo, True, min_pmt_floor=curr_pmt)
+            if not df_snow.empty:
+                snowball_months_saved = ss.p_term_mo - len(df_snow)
+                snowball_interest_saved = total_int_prop - df_snow["Cum Interest"].iloc[-1]
     except Exception:
         pass
-    # True discrete nadir from 1,001-point evaluation
-    fig1.add_trace(go.Scatter(
-        x=[best], y=[best_row["Objective"]], mode="markers+text",
-        marker=dict(symbol="diamond", size=18, color=C_FIX,
-                    line=dict(color="#ffffff", width=2)),
-        name=f"Optimal: {best:.1f}%",
-        text=[f"Optimal {best:.1f}%"], textposition="top center",
-        textfont=dict(color=C_FIX, size=12, family="Inter")))
-    fig1.update_layout(**PLOT_BASE,
-        title=f"Total Cost by Fixed Component % at end of {ss.p_fix_yrs}-year Fixed Period "
-              "(Cumulative Interest + Remaining Balance)",
-        xaxis_title="Fixed Component (%)", yaxis_title="Total Cost ($)")
-    st.plotly_chart(fig1, use_container_width=True)
 
-    # ── Chart 2: Stacked area — composition of cost (Variable interest + Fixed interest + End balance) ──
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(
-        x=sdf["Fixed %"], y=sdf["Variable Interest"],
-        name="Variable Interest", mode="lines",
-        line=dict(width=0), stackgroup="one",
-        fillcolor="rgba(48,217,150,0.5)",
-        hovertemplate="Fixed: %{x:.1f}%<br>Var Interest: $%{y:,.0f}<extra></extra>"))
-    fig2.add_trace(go.Scatter(
-        x=sdf["Fixed %"], y=sdf["Fixed Interest"],
-        name="Fixed Interest", mode="lines",
-        line=dict(width=0), stackgroup="one",
-        fillcolor="rgba(233,69,96,0.5)",
-        hovertemplate="Fixed: %{x:.1f}%<br>Fixed Interest: $%{y:,.0f}<extra></extra>"))
-    fig2.add_trace(go.Scatter(
-        x=sdf["Fixed %"], y=sdf["End Balance"],
-        name="Remaining Balance", mode="lines",
-        line=dict(width=0), stackgroup="one",
-        fillcolor="rgba(74,154,245,0.4)",
-        hovertemplate="Fixed: %{x:.1f}%<br>Remaining Bal: $%{y:,.0f}<extra></extra>"))
-    # Mark optimal
-    fig2.add_shape(type="line", x0=best, x1=best, y0=0, y1=1, yref="paper",
-                   line=dict(color="#ffffff", dash="dash", width=1.5))
-    fig2.add_annotation(x=best, y=1.02, yref="paper", xref="x",
-                        text=f"<b>Optimal {best:.1f}%</b>", showarrow=False,
-                        font=dict(color=C_FIX, size=11))
-    fig2.update_layout(**PLOT_BASE,
-        title="Cost Composition at End of Fixed Period",
-        xaxis_title="Fixed Component (%)", yaxis_title="Amount ($)")
-    st.plotly_chart(fig2, use_container_width=True)
+    # ── THEME V: Checklist conditions ────────────────────────────────────
+    has_split = 0 < best_pct < 100
+    has_offset = off_prop > 0
+    has_fixed = best_pct > 0
+    rate_drop = max(0, c_rate - p_blended_rate)
 
-    # ── Chart 3: Key percentages bar comparison ──
-    key_pcts = sorted(set([0.0, 25.0, 50.0, 75.0, 100.0, round(best, 1)]))
-    key_rows = [sdf[sdf["Fixed %"] == p].iloc[0] for p in key_pcts if p in sdf["Fixed %"].values]
+    return {
+        "rba_rate": rba_rate,
+        "c_rate": c_rate, "c_bal": c_bal, "c_term_rem": c_term_rem,
+        "p_blended_rate": p_blended_rate, "p_eff_var": p_eff_var, "p_eff_fix": p_eff_fix,
+        "off_curr": off_curr, "off_prop": off_prop,
+        "curr_eff_after_off": curr_eff_after_off,
+        "prop_eff_after_off": prop_eff_after_off,
+        "curr_spread_bps": curr_spread_bps, "prop_spread_bps": prop_spread_bps,
+        "curr_eff_spread_bps": curr_eff_spread_bps,
+        "prop_eff_spread_bps": prop_eff_spread_bps,
+        "curr_tier": curr_tier, "prop_tier": prop_tier,
+        "curr_eff_tier": curr_eff_tier, "prop_eff_tier": prop_eff_tier,
+        "prop_annual_interest": prop_annual_interest,
+        "horizon_mo": horizon_mo,
+        "scen_split": scen_split, "scen_var_off": scen_var_off, "scen_all_fix": scen_all_fix,
+        "disaster_cost": disaster_cost, "freedom_cost": freedom_cost,
+        "curr_pmt": curr_pmt, "prop_pmt": prop_pmt, "monthly_saving": monthly_saving,
+        "switch_cost": switch_cost, "break_even_mo": break_even_mo,
+        "total_int_curr": total_int_curr, "total_int_prop": total_int_prop,
+        "lifetime_saving": lifetime_saving,
+        "snowball_months_saved": snowball_months_saved,
+        "snowball_interest_saved": snowball_interest_saved,
+        "has_split": has_split, "has_offset": has_offset, "has_fixed": has_fixed,
+        "rate_drop": rate_drop,
+        "best_pct": best_pct,
+    }
 
-    fig3 = go.Figure()
-    x_labels = [f"{r['Fixed %']:.1f}%" + (" ★" if abs(r['Fixed %'] - best) < 0.05 else "") for r in key_rows]
-    fig3.add_trace(go.Bar(
-        x=x_labels, y=[r["Variable Interest"] for r in key_rows],
-        name="Variable Interest", marker_color=C_VAR,
-        hovertemplate="Var Int: $%{y:,.0f}<extra></extra>"))
-    fig3.add_trace(go.Bar(
-        x=x_labels, y=[r["Fixed Interest"] for r in key_rows],
-        name="Fixed Interest", marker_color=C_FIX,
-        hovertemplate="Fix Int: $%{y:,.0f}<extra></extra>"))
-    fig3.add_trace(go.Bar(
-        x=x_labels, y=[r["End Balance"] for r in key_rows],
-        name="End Balance", marker_color=C_ORIG,
-        hovertemplate="Balance: $%{y:,.0f}<extra></extra>"))
-    fig3.update_layout(**PLOT_BASE, barmode="stack",
-        title="Key Split Ratios — Comparison (★ = optimal)",
-        xaxis_title="Fixed Component", yaxis_title="Amount ($)")
-    st.plotly_chart(fig3, use_container_width=True)
+def _hero_card(tier_lbl: str, clr: str, big_text: str, sub_text: str = ""):
+    """Large coloured hero-style summary card used across themes."""
+    sub_html = f'<div style="color:#8892b0;font-size:0.84rem;margin-top:6px">{sub_text}</div>' if sub_text else ""
+    return (f'<div style="background:#0b0f1a;border:1px solid {clr};border-left:4px solid {clr};'
+            f'border-radius:7px;padding:16px 20px;margin-bottom:14px">'
+            f'<div style="color:{clr};font-size:0.7rem;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:.08em;margin-bottom:6px">{tier_lbl}</div>'
+            f'<div style="color:#d4dbe8;font-size:1.3rem;font-weight:600;line-height:1.35">{big_text}</div>'
+            f'{sub_html}</div>')
 
-    # ── Summary table ──
-    tbl = sdf[sdf["Fixed %"] % 5 == 0].copy()
-    st.dataframe(pd.DataFrame({
-        "Fixed %": tbl["Fixed %"].apply(lambda x: f"{x:.0f}%"),
-        "Variable %": tbl["Variable %"].apply(lambda x: f"{x:.0f}%"),
-        "Variable Interest": tbl["Variable Interest"].apply(fc),
-        "Fixed Interest": tbl["Fixed Interest"].apply(fc),
-        "Total Interest": tbl["Cum Interest"].apply(fc),
-        "End Balance": tbl["End Balance"].apply(fc),
-        "Objective": tbl["Objective"].apply(fc),
-    }), use_container_width=True, hide_index=True)
-
-def dash_strategy_tab(R):
+# ── THEME I: Macro-Economic Anchor ───────────────────────────────────────
+def theme_i_anchor(R, F):
     ss = st.session_state
-    loan, term = ss.p_loan_amt, ss.p_term_mo
-    fix_mo = ss.p_fix_yrs * 12
-    best = R["best_pct"]
+    rba = F["rba_rate"]
 
-    strat_map = {"Conservative (80% Fixed)": 80.0,
-                 "Balanced (Optimal Split)": best,
-                 "Aggressive (0% Fixed)": 0.0,
-                 "Manual": ss.p_split_pct}
-    sel_pct = strat_map.get(ss.strategy, best)
+    st.markdown('<h3 style="color:#4a9af5;font-size:1rem;font-weight:600;margin:4px 0 8px">'
+                'Theme I · The Macro-Economic Anchor</h3>', unsafe_allow_html=True)
     st.markdown(
-        f'<div class="note-ok">Selected strategy (set in Proposed Loan section): '
-        f'<strong>{ss.strategy}</strong> — {sel_pct:.1f}% fixed / '
-        f'{100-sel_pct:.1f}% variable</div>',
+        '<div class="note">Your loan\'s "cost of capital" measured against the '
+        'RBA Cash Rate. The tighter this spread, the more efficient your debt.</div>',
         unsafe_allow_html=True)
 
-    strats = {"Conservative\n(80% Fixed)": (80.0, C_FIX),
-              "Balanced\n(Optimal)": (best, C_SPLIT),
-              "Aggressive\n(0% Fixed)": (0.0, C_VAR)}
-    totals_ci, totals_pmt = {}, {}
-    for nm, (pct_f, _) in strats.items():
-        p_f_ = loan * pct_f / 100
-        p_v_ = loan * (100 - pct_f) / 100
-        bf, cif = fast_partial(p_f_, ss.p_adv_fix_rate, term, fix_mo) if p_f_ > 0 else (0, 0)
-        bv, civ = fast_partial(p_v_, R["eff_var"], term, fix_mo) if p_v_ > 0 else (0, 0)
-        rem = max(0, term - fix_mo)
-        _, cif2 = fast_partial(bf, ss.p_rev_rate, rem, rem) if rem > 0 and bf > 0 else (0, 0)
-        _, civ2 = fast_partial(bv, R["eff_var"], rem, rem) if rem > 0 and bv > 0 else (0, 0)
-        k = nm.split("\n")[0]
-        totals_ci[k] = cif + civ + cif2 + civ2
-        totals_pmt[k] = ((calc_payment(p_f_, ss.p_adv_fix_rate, term) if p_f_ > 0 else 0)
-                        + (calc_payment(p_v_, R["eff_var"], term) if p_v_ > 0 else 0))
+    # Hero card: the proximity outcome
+    prop_tier_lbl, prop_tier_clr = F["prop_eff_tier"]
+    hero_text = (
+        f'Your proposed loan operates at <strong style="color:{prop_tier_clr}">'
+        f'{F["prop_eff_spread_bps"]:.0f} bps</strong> above the RBA Cash Rate '
+        f'of {fp(rba)} after offset benefit.'
+    )
+    hero_sub = (
+        f'Effective rate after offset: <strong>{fp(F["prop_eff_after_off"])}</strong>'
+        f' on net debt of <strong>{fc(max(0, ss.p_loan_amt - F["off_prop"]))}</strong>'
+        f' (${ss.p_loan_amt:,.0f} loan − ${F["off_prop"]:,.0f} offset).'
+    )
+    st.markdown(_hero_card(prop_tier_lbl + " PROXIMITY", prop_tier_clr, hero_text, hero_sub),
+                unsafe_allow_html=True)
 
-    c1, c2 = st.columns(2)
-    clrs = [C_FIX, C_SPLIT, C_VAR]
+    # Comparison grid
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
-        fig = go.Figure(go.Bar(x=list(totals_ci.keys()), y=list(totals_ci.values()),
-            marker_color=clrs, text=[fc(v) for v in totals_ci.values()],
-            textposition="outside",
-            hovertemplate="%{x}<br>$%{y:,.0f}<extra></extra>"))
-        fig.update_layout(**PLOT_BASE, title="Total Interest by Strategy",
-                          yaxis_title="Total Interest ($)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.markdown(metric_card("RBA Cash Rate (live)", fp(rba)),
+                    unsafe_allow_html=True)
     with c2:
-        fig2 = go.Figure(go.Bar(x=list(totals_pmt.keys()), y=list(totals_pmt.values()),
-            marker_color=clrs, text=[fc(v) for v in totals_pmt.values()],
-            textposition="outside",
-            hovertemplate="%{x}<br>$%{y:,.0f}<extra></extra>"))
-        fig2.update_layout(**PLOT_BASE, title="Initial Monthly Repayment by Strategy",
-                           yaxis_title="Monthly Repayment ($)")
-        st.plotly_chart(fig2, use_container_width=True)
+        tierL, tierC = F["curr_tier"]
+        st.markdown(metric_card(f"Current Headline Rate",
+                                 fp(F["c_rate"]),
+                                 diff=f"+{F['curr_spread_bps']:.0f} bps ({tierL})",
+                                 diff_pos=False, diff_neutral=(F['curr_spread_bps']<170)),
+                    unsafe_allow_html=True)
+    with c3:
+        tierL, tierC = F["prop_tier"]
+        st.markdown(metric_card(f"Proposed Headline (blended)",
+                                 fp(F["p_blended_rate"]),
+                                 diff=f"+{F['prop_spread_bps']:.0f} bps ({tierL})",
+                                 diff_pos=False, diff_neutral=(F['prop_spread_bps']<170)),
+                    unsafe_allow_html=True)
+    with c4:
+        st.markdown(metric_card("Proposed Effective After Offset",
+                                 fp(F["prop_eff_after_off"]),
+                                 diff=f"+{F['prop_eff_spread_bps']:.0f} bps vs RBA",
+                                 diff_neutral=True),
+                    unsafe_allow_html=True)
 
-def dash_scenarios(R):
-    scenarios = R["scenarios"]
-    if not scenarios:
-        st.warning("No scenario data.")
-        return
-    base = scenarios.get("Base", {})
-    base_pmt = base.get("payment", 0)
-    base_int = base.get("total_interest", 0)
-    base_term = base.get("term_months", 0)
+    # Spread chart — current vs proposed (headline & effective) vs RBA
+    fig = go.Figure()
+    cats = ["RBA Cash Rate", "Current Headline", "Current After Offset",
+            "Proposed Headline", "Proposed After Offset"]
+    vals = [rba, F["c_rate"], F["curr_eff_after_off"],
+            F["p_blended_rate"], F["prop_eff_after_off"]]
+    clrs = [C_ORIG, "#e94560", "#f5a94a", C_CURR, "#30d996"]
+    fig.add_trace(go.Bar(x=cats, y=vals, marker_color=clrs,
+                         text=[f"{v:.2f}%" for v in vals], textposition="outside",
+                         hovertemplate="%{x}<br>%{y:.2f}%<extra></extra>"))
+    # RBA baseline
+    fig.add_shape(type="line", x0=-0.5, x1=4.5, xref="x", y0=rba, y1=rba, yref="y",
+                  line=dict(color=C_ORIG, dash="dash", width=1.5))
+    fig.add_annotation(x=4.5, y=rba, text=f"RBA {fp(rba)}", xref="x", yref="y",
+                       showarrow=False, xanchor="right", yanchor="bottom",
+                       font=dict(color=C_ORIG, size=10))
+    fig.update_layout(**PLOT_BASE, title="Rate Stack: Your Loan vs the RBA Benchmark",
+                       yaxis_title="Rate (%)", showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("**Monthly Repayments Under Rate Scenarios**")
+    # Tier reference
     st.markdown(
-        '<div class="note">Rate rises increase repayments (term never extends). '
-        'Rate falls reduce repayments unless the "maintain repayment" toggle is on '
-        '(in which case the loan pays off faster instead).</div>',
+        '<div class="sub-title">Spread Tier Reference</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;font-size:0.75rem">'
+        '<div style="background:#0b0f1a;border-left:3px solid #30d996;padding:8px 10px">'
+        '<div style="color:#30d996;font-weight:600">Elite</div><div style="color:#8892b0">≤100 bps</div></div>'
+        '<div style="background:#0b0f1a;border-left:3px solid #4a9af5;padding:8px 10px">'
+        '<div style="color:#4a9af5;font-weight:600">Competitive</div><div style="color:#8892b0">101-170 bps</div></div>'
+        '<div style="background:#0b0f1a;border-left:3px solid #f5a94a;padding:8px 10px">'
+        '<div style="color:#f5a94a;font-weight:600">Market</div><div style="color:#8892b0">171-220 bps</div></div>'
+        '<div style="background:#0b0f1a;border-left:3px solid #e94560;padding:8px 10px">'
+        '<div style="color:#e94560;font-weight:600">Expensive</div><div style="color:#8892b0">221-270 bps</div></div>'
+        '<div style="background:#0b0f1a;border-left:3px solid #e94560;padding:8px 10px">'
+        '<div style="color:#e94560;font-weight:600">Very Expensive</div><div style="color:#8892b0">>270 bps</div></div>'
+        '</div>', unsafe_allow_html=True)
+
+    st.markdown(
+        f'<div class="note" style="margin-top:16px">Annual interest at proposed blended rate: '
+        f'<strong>{fc(F["prop_annual_interest"])}</strong>'
+        f' (on net debt after offset, pre-compounding).</div>',
         unsafe_allow_html=True)
 
-    rows = []
-    for lbl, data in scenarios.items():
-        dp = data["payment"] - base_pmt
-        di = data["total_interest"] - base_int
-        dt = data["term_months"] - base_term
-        rows.append({"Scenario": lbl, "Variable Rate": fp(data["rate"]),
-                     "Monthly Repayment": fc(data["payment"]),
-                     "vs Base": f"{'+' if dp>=0 else ''}{fc(dp)}",
-                     "Total Interest": fc(data["total_interest"]),
-                     "Interest vs Base": f"{'+' if di>=0 else ''}{fc(di)}",
-                     "Term (mo)": str(data["term_months"]),
-                     "Term vs Base": f"{'+' if dt>=0 else ''}{dt} mo"})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+# ── THEME II: Strategy Stress-Test ──────────────────────────────────────
+def theme_ii_strategy(R, F):
+    ss = st.session_state
+    horizon_mo = F["horizon_mo"]
+    horizon_yrs = horizon_mo / 12
 
-    scen_colors = [C_SPLIT, C_FIX, "#f59e0b", "#ef4444", C_VAR, "#22d3ee", C_ORIG]
-    fig_pmt = go.Figure()
-    for (lbl, data), clr in zip(scenarios.items(), scen_colors):
-        df_s = data.get("df")
-        if df_s is not None and not df_s.empty:
-            fig_pmt.add_trace(go.Scatter(x=df_s["Date"], y=df_s["Payment"], name=lbl,
-                line=dict(color=clr, width=2 if lbl == "Base" else 1.5,
-                          dash="solid" if lbl == "Base" else "dash"),
-                hovertemplate=f"<b>{lbl}</b><br>%{{x|%b %Y}}<br>$%{{y:,.0f}}/mo<extra></extra>"))
-    fig_pmt.update_layout(**PLOT_BASE, title="Monthly Repayments — Rate Scenarios",
-                          yaxis_title="Monthly Repayment ($)")
-    fig_pmt.update_xaxes(rangeslider=dict(visible=True, thickness=0.04))
-    st.plotly_chart(fig_pmt, use_container_width=True)
+    st.markdown('<h3 style="color:#4a9af5;font-size:1rem;font-weight:600;margin:4px 0 8px">'
+                'Theme II · The Strategic Conflict — Variable vs Fixed vs Split</h3>',
+                unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="note">Stress-test of three configurations over your {horizon_yrs:.1f}-year '
+        f'Fixed Period ({horizon_mo} months), holding all other inputs constant. '
+        f'Anticipated rate changes and RBA scenario are included.</div>',
+        unsafe_allow_html=True)
 
-    fig_bal = go.Figure()
-    for (lbl, data), clr in zip(scenarios.items(), scen_colors):
-        df_s = data.get("df")
-        if df_s is not None and not df_s.empty:
-            fig_bal.add_trace(go.Scatter(x=df_s["Date"], y=df_s["Closing Balance"], name=lbl,
-                line=dict(color=clr, width=2 if lbl == "Base" else 1.5,
-                          dash="solid" if lbl == "Base" else "dash"),
-                hovertemplate=f"<b>{lbl}</b><br>%{{x|%b %Y}}<br>$%{{y:,.0f}}<extra></extra>"))
-    fig_bal.update_layout(**PLOT_BASE, title="Outstanding Balance — Rate Scenarios",
-                          yaxis_title="Balance ($)")
-    fig_bal.update_xaxes(rangeslider=dict(visible=True, thickness=0.04))
-    st.plotly_chart(fig_bal, use_container_width=True)
+    # The three scenarios
+    scenarios = [
+        ("The Optimized Split", f"{F['best_pct']:.0f}% Fixed + {100-F['best_pct']:.0f}% Variable with Offset",
+         F["scen_split"], C_SPLIT, "Structural winner — Rate insurance + 100% Offset efficiency"),
+        ("100% Variable with Offset", f"Full ${ss.p_loan_amt:,.0f} at Variable with Offset",
+         F["scen_var_off"], C_VAR, "The Flexibility Play — no break fees, but exposed to rises"),
+        ("100% Fixed, No Offset", f"Full ${ss.p_loan_amt:,.0f} at Fixed, offset disabled",
+         F["scen_all_fix"], C_FIX, "Offset Disaster — pay interest on your own cash"),
+    ]
+    # Sort ascending by interest (winner first)
+    scenarios_ranked = sorted(scenarios, key=lambda x: x[2])
+    winner = scenarios_ranked[0]
+    loser = scenarios_ranked[-1]
 
-def dash_schedules(R):
-    options = {"Original Loan": R["df_orig"],
-               "Current Loan": R["df_curr"],
-               "Proposed Variable Component": R["df_pv"],
-               "Proposed Fixed Component": R["df_pf"],
-               "Proposed Split (Combined)": R["df_ps"]}
-    avail = {k: v for k, v in options.items() if v is not None and not v.empty}
-    if not avail:
-        st.warning("No schedules.")
-        return
-    sel = st.selectbox("Select schedule", list(avail.keys()), key="sch_sel")
-    df = avail[sel].copy()
-    disp = df.copy()
-    money_cols = ["Opening Balance", "Avg Offset", "Net Debt", "Interest", "Interest Saved",
-                  "Principal", "Extra Repayment", "Fees", "Payment", "Closing Balance",
-                  "Cum Interest", "Cum Paid", "Cum Interest Saved", "Cum Extra Repayment"]
-    for c in money_cols:
-        if c in disp.columns:
-            disp[c] = disp[c].apply(fc)
-    if "Rate %" in disp.columns:
-        disp["Rate %"] = disp["Rate %"].apply(fp)
-    st.dataframe(disp, use_container_width=True, hide_index=True, height=440)
-    buf = io.BytesIO()
-    df.to_csv(buf, index=False)
-    buf.seek(0)
-    st.download_button(f"Download {sel} as CSV", buf.getvalue(),
-                       f"schedule_{sel.lower().replace(' ','_').replace('(','').replace(')','')}.csv",
-                       "text/csv", key=f"dl_{sel}")
+    # Hero: disaster delta
+    st.markdown(_hero_card(
+        "STRUCTURAL WINNER",
+        winner[3],
+        f'{winner[0]} — <strong>{fc(winner[2])}</strong> interest over {horizon_yrs:.1f} years.',
+        f'That\'s <strong>{fc(loser[2] - winner[2])}</strong> less than "{loser[0]}" — '
+        f'the cost of choosing the wrong structure.'),
+        unsafe_allow_html=True)
+
+    # Chart
+    fig = go.Figure()
+    names = [s[0] for s in scenarios]
+    values = [s[2] for s in scenarios]
+    colors = [s[3] for s in scenarios]
+    fig.add_trace(go.Bar(
+        x=names, y=values, marker_color=colors,
+        text=[fc(v) for v in values], textposition="outside",
+        hovertemplate="%{x}<br>%{y:$,.0f}<extra></extra>"))
+    fig.update_layout(**PLOT_BASE,
+                       title=f"Cumulative Interest over {horizon_yrs:.1f}-Year Fixed Period",
+                       yaxis_title="Cumulative Interest ($)", showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Scenario detail cards
+    for name, config, interest, clr, verdict in scenarios:
+        delta = interest - winner[2]
+        delta_str = "" if delta < 1 else f' — <strong style="color:#e94560">+{fc(delta)}</strong> vs winner'
+        st.markdown(
+            f'<div style="background:#0b0f1a;border:1px solid #1e2d4a;border-left:3px solid {clr};'
+            f'border-radius:6px;padding:12px 14px;margin-bottom:8px">'
+            f'<div style="color:{clr};font-size:0.9rem;font-weight:600;margin-bottom:4px">{name}</div>'
+            f'<div style="color:#8892b0;font-size:0.82rem;margin-bottom:4px">{config}</div>'
+            f'<div style="color:#d4dbe8;font-size:0.88rem"><strong>{fc(interest)}</strong> interest{delta_str}</div>'
+            f'<div style="color:#64748b;font-size:0.78rem;margin-top:4px;font-style:italic">{verdict}</div>'
+            f'</div>', unsafe_allow_html=True)
+
+    if not F["has_offset"]:
+        st.markdown(
+            '<div class="note-warn">You have no offset balance entered. The "Offset Disaster" '
+            'difference shrinks to zero — but so does the benefit of variable flexibility. '
+            'If you have even modest savings, an offset-enabled variable portion materially '
+            'reduces effective interest.</div>', unsafe_allow_html=True)
+
+# ── THEME III: Execution & Break-Even ────────────────────────────────────
+def theme_iii_execution(R, F):
+    ss = st.session_state
+
+    st.markdown('<h3 style="color:#4a9af5;font-size:1rem;font-weight:600;margin:4px 0 8px">'
+                'Theme III · Execution — Break-Even Analysis</h3>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="note">How many months before the switch pays for itself, and what '
+        'you\'d gain after that point.</div>', unsafe_allow_html=True)
+
+    be = F["break_even_mo"]
+    if be == float("inf") or be > 240:
+        hero_tier = "NO BREAK-EVEN"; hero_clr = "#e94560"
+        hero_text = "The proposed loan does not save money over the current loan."
+        hero_sub = ("Check that proposed rates are lower than current, or that switching "
+                    "costs aren't too high relative to monthly savings.")
+    elif be <= 6:
+        hero_tier = "RAPID BREAK-EVEN"; hero_clr = "#30d996"
+        hero_text = f'Switch pays for itself in <strong>{be:.1f} months</strong>.'
+        hero_sub = "Anything after this point is pure interest saving."
+    elif be <= 18:
+        hero_tier = "GOOD BREAK-EVEN"; hero_clr = "#4a9af5"
+        hero_text = f'Switch pays for itself in <strong>{be:.1f} months</strong>.'
+        hero_sub = "Within a typical stay-time for the loan."
+    elif be <= 36:
+        hero_tier = "SLOW BREAK-EVEN"; hero_clr = "#f5a94a"
+        hero_text = f'Switch pays for itself in <strong>{be:.1f} months</strong>.'
+        hero_sub = "Only worthwhile if you plan to keep this loan for several more years."
+    else:
+        hero_tier = "MARGINAL"; hero_clr = "#e94560"
+        hero_text = f'Break-even after <strong>{be:.1f} months</strong> — longer than typical loan tenure.'
+        hero_sub = "Reconsider unless fees can be negotiated down."
+
+    st.markdown(_hero_card(hero_tier, hero_clr, hero_text, hero_sub), unsafe_allow_html=True)
+
+    # Component breakdown
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(metric_card("Current Monthly Payment", fc(F["curr_pmt"])),
+                    unsafe_allow_html=True)
+    with c2:
+        st.markdown(metric_card("Proposed Monthly Payment", fc(F["prop_pmt"])),
+                    unsafe_allow_html=True)
+    with c3:
+        st.markdown(metric_card("Monthly Saving",
+                                 fc(F["monthly_saving"]) if F["monthly_saving"] > 0 else "None",
+                                 diff_pos=True,
+                                 diff="—" if F["monthly_saving"] <= 0 else ""),
+                    unsafe_allow_html=True)
+    with c4:
+        st.markdown(metric_card("Total Switch Cost", fc(F["switch_cost"]),
+                                 diff_neutral=True),
+                    unsafe_allow_html=True)
+
+    # Payback curve
+    if F["monthly_saving"] > 0 and be != float("inf"):
+        months = np.arange(0, min(60, int(be * 3) + 12))
+        cum_saving = np.maximum(0, months * F["monthly_saving"] - F["switch_cost"])
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=months, y=cum_saving,
+            name="Cumulative Net Saving",
+            line=dict(color=C_VAR, width=2.5),
+            fill="tozeroy", fillcolor="rgba(48,217,150,0.08)",
+            hovertemplate="Month %{x}<br>Net: %{y:$,.0f}<extra></extra>"))
+        # Break-even marker
+        fig.add_shape(type="line", x0=be, x1=be, y0=0, y1=1, yref="paper",
+                       line=dict(color=C_FIX, dash="dash", width=1.5))
+        fig.add_annotation(x=be, y=0.95, yref="paper", xref="x",
+                            text=f"<b>Break-even month {be:.1f}</b>",
+                            showarrow=False, font=dict(color=C_FIX, size=11),
+                            bgcolor=C_PAPER, bordercolor=C_FIX, borderwidth=1)
+        # Zero line
+        fig.add_shape(type="line", x0=0, x1=months[-1], y0=0, y1=0,
+                       line=dict(color=C_GRID, width=1))
+        fig.update_layout(**PLOT_BASE, title="Payback Curve",
+                           xaxis_title="Months after Switch", yaxis_title="Cumulative Net Saving ($)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Switching cost composition
+    cost_breakdown = [
+        ("Proposed Variable Setup", ss.p_var_fee_setup),
+        ("Proposed Fixed Setup", ss.p_fix_fee_setup if not ss.p_fees_match else 0),
+        ("Proposed Variable Other", ss.p_var_fee_other),
+        ("Proposed Fixed Other", ss.p_fix_fee_other if not ss.p_fees_match else 0),
+    ]
+    if ss.c_is_cont:
+        cost_breakdown.append(("Original Breakage", ss.o_fee_break))
+    cost_breakdown = [(n, v) for n, v in cost_breakdown if v > 0]
+
+    if cost_breakdown:
+        st.markdown('<div class="sub-title">Switch Cost Breakdown</div>', unsafe_allow_html=True)
+        cols = st.columns(len(cost_breakdown))
+        for col, (nm, val) in zip(cols, cost_breakdown):
+            with col:
+                st.markdown(metric_card(nm, fc(val), diff_neutral=True),
+                            unsafe_allow_html=True)
+
+# ── THEME IV: Life-of-Loan Forecast ─────────────────────────────────────
+def theme_iv_forecast(R, F):
+    ss = st.session_state
+
+    st.markdown('<h3 style="color:#4a9af5;font-size:1rem;font-weight:600;margin:4px 0 8px">'
+                'Theme IV · Life-of-Loan Forecast — The Snowball Effect</h3>',
+                unsafe_allow_html=True)
+    st.markdown(
+        '<div class="note">Compound impact of the rate difference over the entire loan life, '
+        'and what happens if you hold your current payment amount after refinancing.</div>',
+        unsafe_allow_html=True)
+
+    # Hero: snowball result
+    if F["snowball_months_saved"] > 0:
+        yrs = F["snowball_months_saved"] / 12
+        hero = _hero_card(
+            "SNOWBALL RESULT", "#30d996",
+            f'By holding your current payment of <strong>{fc(F["curr_pmt"])}</strong>/mo '
+            f'after switching, you pay the loan off <strong>{F["snowball_months_saved"]} months '
+            f'({yrs:.1f} years) earlier</strong>.',
+            f'Saving an extra <strong>{fc(F["snowball_interest_saved"])}</strong> in interest '
+            f'beyond the baseline refinance.'
+        )
+        st.markdown(hero, unsafe_allow_html=True)
+    elif F["lifetime_saving"] > 0:
+        hero = _hero_card(
+            "LIFETIME SAVING", "#4a9af5",
+            f'Refinancing saves <strong>{fc(F["lifetime_saving"])}</strong> in total interest over the life of the loan.',
+            'If you also hold your current payment after switching, you\'d save more time and interest — adjust inputs to see.'
+        )
+        st.markdown(hero, unsafe_allow_html=True)
+    else:
+        hero = _hero_card(
+            "NO LIFETIME SAVING", "#e94560",
+            'Refinancing doesn\'t reduce lifetime interest given current inputs.',
+            'Check that proposed rates are materially below current, and that offset utilisation is realistic.'
+        )
+        st.markdown(hero, unsafe_allow_html=True)
+
+    # Metrics row
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(metric_card("Current Loan Total Interest", fc(F["total_int_curr"])),
+                    unsafe_allow_html=True)
+    with c2:
+        st.markdown(metric_card("Proposed Loan Total Interest", fc(F["total_int_prop"]),
+                                 diff=f"{'−' if F['lifetime_saving']>0 else '+'}{fc(abs(F['lifetime_saving']))}",
+                                 diff_pos=(F['lifetime_saving']>0)),
+                    unsafe_allow_html=True)
+    with c3:
+        st.markdown(metric_card("With Snowball (pay current amount)",
+                                 fc(F["total_int_prop"] - F["snowball_interest_saved"])
+                                    if F["snowball_interest_saved"] > 0 else fc(F["total_int_prop"]),
+                                 diff=f"−{fc(F['snowball_interest_saved'])}" if F["snowball_interest_saved"] > 0 else "",
+                                 diff_pos=True),
+                    unsafe_allow_html=True)
+    with c4:
+        st.markdown(metric_card("Months Saved (snowball)",
+                                 f"{F['snowball_months_saved']} mo" if F["snowball_months_saved"] > 0 else "—",
+                                 diff=f"{F['snowball_months_saved']/12:.1f} yrs earlier" if F["snowball_months_saved"] > 0 else "",
+                                 diff_pos=True),
+                    unsafe_allow_html=True)
+
+    # Balance over time: current vs proposed vs proposed+snowball
+    df_c, df_ps = R["df_curr"], R["df_ps"]
+    if df_c is not None and not df_c.empty and df_ps is not None and not df_ps.empty:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=df_c["Date"], y=df_c["Closing Balance"],
+                                  name="Current Loan", line=dict(color=C_CURR, width=2),
+                                  hovertemplate="Current<br>%{x|%b %Y}<br>$%{y:,.0f}<extra></extra>"))
+        fig.add_trace(go.Scatter(x=df_ps["Date"], y=df_ps["Closing Balance"],
+                                  name="Proposed Loan (min payment)",
+                                  line=dict(color=C_SPLIT, width=2),
+                                  fill="tozeroy", fillcolor="rgba(196,122,245,0.05)",
+                                  hovertemplate="Proposed<br>%{x|%b %Y}<br>$%{y:,.0f}<extra></extra>"))
+        # Snowball overlay
+        try:
+            if F["curr_pmt"] > F["prop_pmt"]:
+                p_var_deltas = list(ss.future_var_deltas)
+                vsched = build_rate_schedule(ss.p_adv_var_rate, p_var_deltas)
+                df_snow = amortize(ss.p_loan_amt, ss.p_start_date, ss.p_term_mo,
+                                    vsched, F["off_prop"], ss.p_off_monthly,
+                                    deltas_to_lumps_t(ss.p_off_lumps, ss.p_start_date),
+                                    deltas_to_lumps_t(ss.p_extra_repay, ss.p_start_date),
+                                    ss.p_var_fee_mo, True, min_pmt_floor=F["curr_pmt"])
+                if not df_snow.empty:
+                    fig.add_trace(go.Scatter(x=df_snow["Date"], y=df_snow["Closing Balance"],
+                                              name="Proposed + Snowball (hold current payment)",
+                                              line=dict(color=C_VAR, width=2, dash="dot"),
+                                              hovertemplate="Snowball<br>%{x|%b %Y}<br>$%{y:,.0f}<extra></extra>"))
+        except Exception:
+            pass
+        fig.update_layout(**PLOT_BASE,
+                           title="Balance Paydown Over Time",
+                           yaxis_title="Outstanding Balance ($)")
+        fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.04))
+        st.plotly_chart(fig, use_container_width=True)
+
+# ── THEME V: Interrogation Checklist ────────────────────────────────────
+def theme_v_checklist(R, F):
+    ss = st.session_state
+
+    st.markdown('<h3 style="color:#4a9af5;font-size:1rem;font-weight:600;margin:4px 0 8px">'
+                'Theme V · Lender Interrogation Checklist</h3>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="note">Questions you must get "Yes" answers to, derived from your '
+        'specific loan configuration. Copy/paste these into your broker or lender brief.</div>',
+        unsafe_allow_html=True)
+
+    # Build a dynamic list
+    questions = []
+
+    # Q1: Offset
+    if F["has_offset"]:
+        questions.append({
+            "q": "Is the offset dollar-for-dollar?",
+            "rationale": f'You have ${F["off_prop"]:,.0f} in the proposed offset. '
+                         f'Confirm interest is calculated daily on the net balance (loan − offset), '
+                         f'not just a partial benefit.',
+            "critical": True,
+        })
+    # Q2: Term preservation
+    orig_term = ss.o_term_mo
+    rem_years = F["c_term_rem"] / 12
+    questions.append({
+        "q": f'Can I fix the remaining term at {rem_years:.0f} years (≈ {F["c_term_rem"]} months)?',
+        "rationale": f'Lenders often reset to 25 or 30 years, which lowers minimum payment '
+                     f'but extends total interest. Your current loan has {F["c_term_rem"]} months '
+                     f'remaining. If they reset, manually set your direct debit to {fc(F["curr_pmt"])}.',
+        "critical": True,
+    })
+    # Q3: Split with offset
+    if F["has_split"] and F["has_offset"]:
+        questions.append({
+            "q": f'Does your {ss.p_adv_fix_rate:.2f}% Fixed rate support a split facility '
+                 f'with a separate Offset account on the variable side?',
+            "rationale": f'Your optimal strategy is {F["best_pct"]:.0f}% Fixed + '
+                         f'{100-F["best_pct"]:.0f}% Variable-with-Offset. Many lenders '
+                         f'offer the headline fixed rate BUT exclude offset entirely. '
+                         f'This is the deal-breaker question.',
+            "critical": True,
+        })
+    # Q4: Extra repayments on fixed
+    if F["has_fixed"]:
+        questions.append({
+            "q": f'What is the annual cap on extra repayments for the Fixed component?',
+            "rationale": f'Ensure at least $10,000/year (or 5% of the fixed balance) can be paid '
+                         f'extra without penalty. Needed if your offset "overflows" during the fixed period.',
+            "critical": False,
+        })
+    # Q5: Establishment waiver
+    if ss.p_var_fee_setup > 0 or ss.p_fix_fee_setup > 0:
+        total_setup = ss.p_var_fee_setup + (0 if ss.p_fees_match else ss.p_fix_fee_setup)
+        questions.append({
+            "q": f'Will you waive the Establishment / Setup Fee ({fc(total_setup)}) given a '
+                 f'{fc(ss.p_loan_amt)} refinance?',
+            "rationale": f'High-value borrowers should not pay for the privilege of switching. '
+                         f'This is routinely waived for loans over $500k.',
+            "critical": False,
+        })
+    # Q6: Breakage fee clarity (if currently fixed)
+    if ss.c_is_cont and ss.o_fee_break > 0:
+        questions.append({
+            "q": f'Break-fee payable ({fc(ss.o_fee_break)}) — request written confirmation of '
+                 f'exact figure before switching.',
+            "rationale": f'Break fees on fixed loans vary with market movement and can spike at signing. '
+                         f'Get the figure in writing within 48h of your refinance settlement date.',
+            "critical": True,
+        })
+    # Q7: Rate lock
+    if F["has_fixed"]:
+        questions.append({
+            "q": f'Do you offer rate-lock on the {ss.p_adv_fix_rate:.2f}% Fixed rate between '
+                 f'application and settlement? Fee?',
+            "rationale": f'Fixed rates can move between application (today) and settlement '
+                         f'({ss.p_start_date.strftime("%d %b %Y")}). Rate lock typically costs '
+                         f'$500-$1000 but can be worth it if the market is trending up.',
+            "critical": False,
+        })
+    # Q8: Rate match / negotiation
+    questions.append({
+        "q": f'If I bring a competitor\'s offer of {fp(F["p_blended_rate"])} in writing, '
+             f'will you match or beat it?',
+        "rationale": f'Lenders frequently match competitive offers to retain business. '
+                     f'Always get a written competing quote before signing.',
+        "critical": False,
+    })
+
+    # Render as styled checklist
+    for i, q in enumerate(questions, 1):
+        border = "#e94560" if q["critical"] else "#4a9af5"
+        tag = "CRITICAL" if q["critical"] else "IMPORTANT"
+        tag_clr = "#e94560" if q["critical"] else "#4a9af5"
+        st.markdown(
+            f'<div style="background:#0b0f1a;border:1px solid #1e2d4a;border-left:3px solid {border};'
+            f'border-radius:6px;padding:12px 14px;margin-bottom:10px">'
+            f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">'
+            f'<span style="background:{tag_clr};color:#fff;font-size:0.65rem;font-weight:700;'
+            f'padding:2px 8px;border-radius:3px;letter-spacing:.05em">{tag}</span>'
+            f'<span style="color:#8892b0;font-size:0.75rem">Q{i}</span></div>'
+            f'<div style="color:#d4dbe8;font-size:0.92rem;font-weight:500;margin-bottom:6px">{q["q"]}</div>'
+            f'<div style="color:#8892b0;font-size:0.82rem;line-height:1.5">{q["rationale"]}</div>'
+            f'</div>', unsafe_allow_html=True)
+
+    # Final forensic conclusion
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown('<h3 style="color:#4a9af5;font-size:1rem;font-weight:600;margin:14px 0 8px">'
+                'Final Forensic Conclusion</h3>', unsafe_allow_html=True)
+
+    # Build recommendation narrative
+    rec_parts = []
+    if F["lifetime_saving"] > 0 and F["break_even_mo"] < 24:
+        rec_parts.append(
+            f'<strong>Proceed with the refinance.</strong> Your proposed structure saves '
+            f'<strong>{fc(F["lifetime_saving"])}</strong> in lifetime interest with break-even '
+            f'at <strong>{F["break_even_mo"]:.1f} months</strong>.')
+    elif F["lifetime_saving"] > 0:
+        rec_parts.append(
+            f'<strong>Refinance is marginally positive.</strong> Lifetime saving '
+            f'<strong>{fc(F["lifetime_saving"])}</strong> but break-even is slow at '
+            f'<strong>{F["break_even_mo"]:.1f} months</strong>. Only proceed if you plan to '
+            f'keep this loan for 3+ years.')
+    else:
+        rec_parts.append(
+            f'<strong>Reconsider.</strong> Proposed structure does not save lifetime interest '
+            f'given current inputs. Review proposed rates and offset utilisation.')
+
+    if F["has_split"]:
+        rec_parts.append(
+            f'Execute a <strong>{F["best_pct"]:.0f}% Fixed / {100-F["best_pct"]:.0f}% Variable</strong> '
+            f'split — this is mathematically optimal given your rate inputs and Fixed Period.')
+
+    prop_tier_lbl, prop_tier_clr = F["prop_eff_tier"]
+    rec_parts.append(
+        f'This minimises your RBA spread to <strong style="color:{prop_tier_clr}">'
+        f'{F["prop_eff_spread_bps"]:.0f} bps ({prop_tier_lbl})</strong>, '
+        f'an effective rate of <strong>{fp(F["prop_eff_after_off"])}</strong> after offset.')
+
+    if F["snowball_months_saved"] > 0:
+        rec_parts.append(
+            f'By holding your current payment of <strong>{fc(F["curr_pmt"])}</strong>/mo, '
+            f'you pay off <strong>{F["snowball_months_saved"]/12:.1f} years earlier</strong> '
+            f'and save an additional <strong>{fc(F["snowball_interest_saved"])}</strong>.')
+
+    narrative = " ".join(rec_parts)
+    st.markdown(
+        f'<div style="background:#0b0f1a;border:2px solid #4a9af5;border-radius:8px;'
+        f'padding:18px 22px;margin-top:10px">'
+        f'<div style="color:#d4dbe8;font-size:0.95rem;line-height:1.7">{narrative}</div>'
+        f'</div>', unsafe_allow_html=True)
+
+    # Copy-ready text version
+    with st.expander("Plain-text version (copy to broker email / document)", expanded=False):
+        import re as _re
+        plain = _re.sub(r'<[^>]+>', '', narrative)
+        plain = plain.replace("&nbsp;", " ")
+        st.code(plain, language=None)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
@@ -2474,16 +2669,20 @@ def main():
         </div>""", unsafe_allow_html=True)
         return
 
-    tabs = st.tabs(["Overview", "Monthly Payments", "Loan Balance", "Interest Analysis",
-                    "Optimal Split", "Strategy", "Rate Scenarios", "Schedules"])
-    with tabs[0]: dash_overview(R)
-    with tabs[1]: dash_payments(R)
-    with tabs[2]: dash_balance(R)
-    with tabs[3]: dash_interest(R)
-    with tabs[4]: dash_split(R)
-    with tabs[5]: dash_strategy_tab(R)
-    with tabs[6]: dash_scenarios(R)
-    with tabs[7]: dash_schedules(R)
+    F = forensic_compute(R)
+
+    tabs = st.tabs([
+        "I · Macro Anchor",
+        "II · Strategic Conflict",
+        "III · Execution & Break-Even",
+        "IV · Life-of-Loan Forecast",
+        "V · Lender Checklist",
+    ])
+    with tabs[0]: theme_i_anchor(R, F)
+    with tabs[1]: theme_ii_strategy(R, F)
+    with tabs[2]: theme_iii_execution(R, F)
+    with tabs[3]: theme_iv_forecast(R, F)
+    with tabs[4]: theme_v_checklist(R, F)
 
 
 if __name__ == "__main__":
