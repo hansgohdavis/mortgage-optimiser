@@ -19,6 +19,18 @@ try:
 except ImportError:
     HAS_SCIPY = False
 
+try:
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except ImportError:
+    HAS_BS4 = False
+
+try:
+    import yfinance as yf
+    HAS_YF = True
+except ImportError:
+    HAS_YF = False
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -526,152 +538,202 @@ def fetch_rba_history():
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_rba_next_meeting():
     """
-    Fetch next RBA Monetary Policy Board meeting date.
-    Tries ICS calendar, then HTML list page; parses only future dates.
+    Scrape https://www.rba.gov.au/schedules-events/board-meeting-schedules.html
+    using BeautifulSoup, extract the Meeting column from year tables, handle
+    same-month ("5-6 May") and cross-month ("31 March - 1 April") ranges,
+    and return the announcement (end) date of the next future meeting.
     """
     candidates = []
+    browser_hdrs = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
 
-    # ── Attempt 1: ICS feed for monetary-policy-board ─────────────────
-    ics_urls = [
-        "https://www.rba.gov.au/schedules-events/calendar.ics",
-        "https://www.rba.gov.au/schedules-events/calendar/?topics=monetary-policy-board&view=list&format=ics",
-    ]
-    for url in ics_urls:
-        try:
-            r = requests.get(url, headers=HDRS, timeout=10)
-            if r.status_code == 200 and "BEGIN:VEVENT" in r.text:
-                events = re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', r.text, re.DOTALL)
-                for e in events:
-                    summary = re.search(r'SUMMARY:(.+)', e)
-                    if not summary: continue
-                    s = summary.group(1).strip().lower()
-                    if "monetary" not in s and "board" not in s: continue
-                    dstart = re.search(r'DTSTART[^:]*:(\d{8})', e)
-                    if dstart:
-                        try:
-                            dt = datetime.strptime(dstart.group(1), "%Y%m%d").date()
-                            if dt >= TODAY: candidates.append(dt)
-                        except: pass
-        except: pass
-
-    # ── Attempt 2: HTML parse of the calendar list page ───────────────
-    if not candidates:
+    # ── Primary: BeautifulSoup scrape of board-meeting-schedules.html ─────
+    if HAS_BS4:
         try:
             r = requests.get(
-                "https://www.rba.gov.au/schedules-events/calendar/?topics=monetary-policy-board&view=list",
-                headers=HDRS, timeout=10)
+                "https://www.rba.gov.au/schedules-events/board-meeting-schedules.html",
+                headers=browser_hdrs, timeout=12)
             if r.status_code == 200:
-                # Events in list view are wrapped in article/section with date inside
-                # Look for pattern: date followed by "Monetary Policy Board"
-                # Dates appear as "1 April 2026" or "Tuesday 1 April 2026"
-                months = (r"January|February|March|April|May|June|July|August|"
-                         r"September|October|November|December")
-                patterns = [
-                    rf"(\d{{1,2}})\s+({months})\s+(\d{{4}})[^<]*?(?:Monetary\s+Policy|Board)",
-                    rf"(?:Monetary\s+Policy|Board)[^<]*?(\d{{1,2}})\s+({months})\s+(\d{{4}})",
-                    rf"<time[^>]*datetime=\"(\d{{4}}-\d{{2}}-\d{{2}})",
-                ]
-                for pat in patterns:
-                    for m in re.findall(pat, r.text):
-                        try:
-                            if isinstance(m, tuple) and len(m) == 3:
-                                day, mon, yr = m
-                                dt = datetime.strptime(f"{day} {mon} {yr}", "%d %B %Y").date()
-                            else:
-                                ds = m if isinstance(m, str) else m[0]
-                                dt = date.fromisoformat(ds)
-                            if dt >= TODAY: candidates.append(dt)
-                        except: pass
-        except: pass
+                soup = BeautifulSoup(r.content, "html.parser")
+                tables = soup.find_all("table")
+                for table in tables:
+                    # Determine year from summary, caption, or preceding header
+                    summary = (table.get("summary", "") or "").lower()
+                    cap = table.find("caption")
+                    cap_txt = (cap.get_text() if cap else "").lower()
+                    context = summary + " " + cap_txt
+                    is_meeting_table = any(k in context for k in
+                        ["monetary", "board meeting", "meeting dates"])
+                    year = None
+                    ym = re.search(r"(20\d{2})", context)
+                    if ym: year = int(ym.group(1))
+                    if not year or not is_meeting_table:
+                        prev = table.find_previous(["h1", "h2", "h3", "h4"])
+                        if prev:
+                            ptxt = prev.get_text()
+                            if re.search(r"meeting|monetary|board", ptxt, re.I):
+                                is_meeting_table = True
+                            ym = re.search(r"(20\d{2})", ptxt)
+                            if ym and not year: year = int(ym.group(1))
+                    if not year or not is_meeting_table: continue
 
-    # ── Attempt 3: Scrape schedules page for board meeting schedule ──
+                    # Find the Meeting column index from header row
+                    rows = table.find_all("tr")
+                    if not rows: continue
+                    meeting_col = 1  # default
+                    header_cells = rows[0].find_all(["th", "td"])
+                    for ci, hc in enumerate(header_cells):
+                        htxt = hc.get_text(strip=True).lower()
+                        if htxt == "meeting" or htxt.startswith("meeting"):
+                            meeting_col = ci; break
+
+                    for row in rows[1:]:
+                        cells = row.find_all(["td", "th"])
+                        if len(cells) <= meeting_col: continue
+                        text = cells[meeting_col].get_text(strip=True)
+                        # Cross-month range: "31 March - 1 April"  → "1 April"
+                        m = re.search(
+                            r"\d{1,2}\s+[A-Z][a-z]+\s*[–\-−]\s*(\d{1,2})\s+([A-Z][a-z]+)",
+                            text)
+                        if m:
+                            try:
+                                dt = datetime.strptime(
+                                    f"{m.group(1)} {m.group(2)} {year}",
+                                    "%d %B %Y").date()
+                                if dt >= TODAY: candidates.append(dt)
+                                continue
+                            except: pass
+                        # Same-month range: "5-6 May" → "6 May"
+                        m = re.search(
+                            r"(\d{1,2})\s*[–\-−]\s*(\d{1,2})\s+([A-Z][a-z]+)", text)
+                        if m:
+                            try:
+                                dt = datetime.strptime(
+                                    f"{m.group(2)} {m.group(3)} {year}",
+                                    "%d %B %Y").date()
+                                if dt >= TODAY: candidates.append(dt)
+                                continue
+                            except: pass
+                        # Single date: "6 May"
+                        m = re.match(r"^\s*(\d{1,2})\s+([A-Z][a-z]+)\s*$", text)
+                        if m:
+                            try:
+                                dt = datetime.strptime(
+                                    f"{m.group(1)} {m.group(2)} {year}",
+                                    "%d %B %Y").date()
+                                if dt >= TODAY: candidates.append(dt)
+                            except: pass
+        except Exception: pass
+
+    # ── Fallback: ICS calendar feed ───────────────────────────────────────
     if not candidates:
-        try:
-            r = requests.get("https://www.rba.gov.au/schedules-events/",
-                             headers=HDRS, timeout=10)
-            if r.status_code == 200:
-                # Very permissive — find any future Tuesday/Wednesday that could be a meeting
-                months = (r"January|February|March|April|May|June|July|August|"
-                         r"September|October|November|December")
-                for m in re.findall(rf"(\d{{1,2}}\s+(?:{months})\s+\d{{4}})", r.text):
-                    try:
-                        dt = datetime.strptime(m, "%d %B %Y").date()
-                        if dt >= TODAY and dt <= add_months(TODAY, 6):
-                            candidates.append(dt)
-                    except: pass
-        except: pass
+        for url in [
+            "https://www.rba.gov.au/schedules-events/calendar.ics",
+            "https://www.rba.gov.au/schedules-events/calendar/"
+            "?topics=monetary-policy-board&view=list&format=ics",
+        ]:
+            try:
+                r = requests.get(url, headers=browser_hdrs, timeout=10)
+                if r.status_code == 200 and "BEGIN:VEVENT" in r.text:
+                    for e in re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT",
+                                         r.text, re.DOTALL):
+                        sm = re.search(r"SUMMARY:(.+)", e)
+                        if sm and ("monetary" in sm.group(1).lower() or
+                                   "board" in sm.group(1).lower()):
+                            dm = re.search(r"DTSTART[^:]*:(\d{8})", e)
+                            if dm:
+                                try:
+                                    dt = datetime.strptime(dm.group(1), "%Y%m%d").date()
+                                    if dt >= TODAY: candidates.append(dt)
+                                except: pass
+            except: pass
 
-    if candidates:
-        return min(candidates).strftime("%d %B %Y")
-    return None
+    return min(candidates).strftime("%d %B %Y") if candidates else None
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_asx_rba_data():
+# ASX month codes for 30-day Interbank Cash Rate Futures
+ASX_MONTH_CODES = {2: "G", 3: "H", 5: "K", 6: "M",
+                   8: "Q", 9: "U", 11: "X", 12: "Z"}
+
+def _asx_ticker_for_meeting(meeting_date: date) -> str | None:
+    """Return '.AX' ticker for the IB futures contract covering the meeting month.
+       RBA only meets in Feb/Mar/May/Jun/Aug/Sep/Nov/Dec, which map 1-to-1 to
+       ASX IB month codes. Format: IB<letter><YY>.AX e.g. IBK26.AX for May 2026."""
+    letter = ASX_MONTH_CODES.get(meeting_date.month)
+    if not letter:
+        # Pick next available contract month
+        for m in sorted(ASX_MONTH_CODES):
+            if m > meeting_date.month:
+                letter = ASX_MONTH_CODES[m]; break
+        if not letter:
+            letter = ASX_MONTH_CODES[min(ASX_MONTH_CODES)]
+    return f"IB{letter}{meeting_date.year % 100:02d}.AX"
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_asx_rba_data(meeting_iso: str | None = None):
     """
-    Fetch ASX 30-day interbank cash rate futures / RBA probability data.
-    Priorities: rba.isaacgross.net (aggregated data), ASX JSON, fallback empty.
+    Fetch ASX 30-day Interbank Cash Rate Futures price for the contract
+    covering the next RBA meeting month, via yfinance. Falls back to
+    rba.isaacgross.net if yfinance unavailable or request fails.
     """
     result = {}
-    ig_base = "https://rba.isaacgross.net"
-    ig_hdrs = {**HDRS, "Accept": "application/json",
-               "Referer": "https://rba.isaacgross.net/"}
-
-    for path in ["/api/rates", "/api", "/api/v1/rates", "/api/cash-rate",
-                 "/api/futures", "/api/probability", "/rates", "/data"]:
-        try:
-            r = requests.get(f"{ig_base}{path}", headers=ig_hdrs, timeout=6)
-            if r.status_code == 200 and "json" in r.headers.get("Content-Type", ""):
-                data = r.json()
-                result.update({"source": "isaacgross", "data": data})
-                if isinstance(data, dict):
-                    for key in ["futures_price", "ib_price", "price", "implied_rate", "rate"]:
-                        if key in data:
-                            try: result["futures_price"] = float(data[key]); break
-                            except: pass
-                    for key in ["probability", "prob", "rate_change_prob"]:
-                        if key in data:
-                            try: result["probability"] = float(data[key]); break
-                            except: pass
-                elif isinstance(data, list) and data:
-                    result["raw_list"] = data
-                break
+    meeting_date = None
+    if meeting_iso:
+        try: meeting_date = date.fromisoformat(meeting_iso)
         except: pass
 
+    # ── Primary: yfinance ─────────────────────────────────────────────────
+    if HAS_YF and meeting_date:
+        ticker = _asx_ticker_for_meeting(meeting_date)
+        if ticker:
+            try:
+                hist = yf.Ticker(ticker).history(period="5d")
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+                    if 90 < price < 100:
+                        result = {
+                            "ticker": ticker,
+                            "futures_price": round(price, 4),
+                            "implied_yield": round(100 - price, 4),
+                            "data_date": hist.index[-1].strftime("%Y-%m-%d"),
+                            "source": "yfinance",
+                        }
+            except Exception as e:
+                result["yfinance_error"] = str(e)[:120]
+
+    # ── Fallback: rba.isaacgross.net ─────────────────────────────────────
     if "futures_price" not in result:
+        ig_base = "https://rba.isaacgross.net"
         try:
             r = requests.get(ig_base, headers=HDRS, timeout=8)
             if r.status_code == 200:
-                patterns = [r'"futures_price"\s*:\s*([\d.]+)',
-                           r'"ib_price"\s*:\s*([\d.]+)',
-                           r'"price"\s*:\s*([\d.]+)',
-                           r'(9[4-9]\.\d{2})']
-                for pat in patterns:
+                for pat in [r'"futures_price"\s*:\s*([\d.]+)',
+                            r'"ib_price"\s*:\s*([\d.]+)',
+                            r'"price"\s*:\s*([\d.]+)',
+                            r'(9[4-9]\.\d{2})']:
                     mm = re.search(pat, r.text)
                     if mm:
                         try:
                             v = float(mm.group(1))
                             if 90 < v < 100:
-                                result["futures_price"] = v
-                                result["implied_yield"] = round(100 - v, 4)
-                                result["source"] = "isaacgross_page"
+                                result.update({
+                                    "futures_price": v,
+                                    "implied_yield": round(100 - v, 4),
+                                    "source": "isaacgross",
+                                })
                                 break
                         except: pass
-                for pat in [r'"probability"\s*:\s*([\d.]+)', r'"prob"\s*:\s*([\d.]+)']:
+                for pat in [r'"probability"\s*:\s*([\d.]+)',
+                            r'"prob"\s*:\s*([\d.]+)']:
                     mm = re.search(pat, r.text)
                     if mm:
                         try: result["probability"] = float(mm.group(1)); break
                         except: pass
         except: pass
 
-    if not result:
-        for url in ["https://www.asx.com.au/asx/1/exchange/IB/prices",
-                    "https://www.asx.com.au/data/trendlens_snapshot/IB.json"]:
-            try:
-                r = requests.get(url, headers=HDRS, timeout=6)
-                if r.status_code == 200:
-                    data = r.json()
-                    result = {"source": "asx_api", "data": data}; break
-            except: pass
     return result
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -733,7 +795,7 @@ def init_state():
     _d("p_extra_repay", [])  # NEW
 
     # ── Strategy ──
-    _d("strategy", "Balanced (optimal split)")
+    _d("strategy", "Balanced (Optimal Split)")
     _d("maintain_pmt", True); _d("rba_bps", 0)
 
     # ── Live data ──
@@ -749,7 +811,14 @@ def load_live_data():
         ss._rba_rate = fetch_rba_rate_cached()
         ss._rba_history = fetch_rba_history()
         ss._rba_next_meeting = fetch_rba_next_meeting()
-        ss._asx_data = fetch_asx_rba_data()
+        # Derive ISO date of next meeting for the ASX fetcher
+        meeting_iso = None
+        if ss._rba_next_meeting:
+            try:
+                meeting_iso = datetime.strptime(
+                    ss._rba_next_meeting, "%d %B %Y").date().isoformat()
+            except: pass
+        ss._asx_data = fetch_asx_rba_data(meeting_iso)
         # Status flag for UI feedback
         if ss._rba_history:
             ss._rba_fetch_status = f"✓ Loaded {len(ss._rba_history)} RBA rate changes"
@@ -906,171 +975,192 @@ def extra_repay_list(state_key: str, title: str, max_rows: int = 100):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def render_rba_panel():
+    """Render RBA Cash Rate and Market Indicators inline (no own expander).
+       Called from section_scenarios(). History chart omitted per user request
+       (data still used in background for Original Loan auto-fill)."""
     ss = st.session_state
     rate = ss._rba_rate
     meeting = ss._rba_next_meeting
+    asx = ss._asx_data
 
-    with st.expander("RBA Cash Rate and Market Indicators", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown('<div class="data-panel">'
-                        '<div class="data-panel-title">Current RBA Cash Rate</div>',
-                        unsafe_allow_html=True)
-            if rate:
-                st.markdown(f'<div style="font-size:2rem;font-weight:700;color:#4a9af5">'
-                            f'{fp(rate)}</div>', unsafe_allow_html=True)
-                history = ss._rba_history
-                if len(history) >= 2:
-                    last = history[-1]
-                    d_str = last["date"].strftime("%d %b %Y")
-                    if last["delta"] > 0:
-                        st.markdown(f'<div class="rate-up">▲ +{last["delta"]:.2f}% on {d_str}</div>',
-                                    unsafe_allow_html=True)
-                    elif last["delta"] < 0:
-                        st.markdown(f'<div class="rate-dn">▼ {last["delta"]:.2f}% on {d_str}</div>',
-                                    unsafe_allow_html=True)
-                    else:
-                        st.markdown(f'<div class="rate-nc">Unchanged as of {d_str}</div>',
-                                    unsafe_allow_html=True)
-            else:
-                st.markdown('<div style="color:#64748b">Unable to fetch — see rba.gov.au</div>',
-                            unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sec-title">RBA Cash Rate and Market Indicators</div>',
+        unsafe_allow_html=True)
 
-        with c2:
-            st.markdown('<div class="data-panel">'
-                        '<div class="data-panel-title">Next Monetary Policy Decision</div>',
-                        unsafe_allow_html=True)
-            if meeting:
-                st.markdown(f'<div style="font-size:1.1rem;font-weight:600;color:#d4dbe8">'
-                            f'{meeting}</div>', unsafe_allow_html=True)
-                try:
-                    dt = datetime.strptime(meeting, "%d %B %Y").date()
-                    days = (dt - TODAY).days
-                    if days > 0:
-                        st.markdown(f'<div style="color:#64748b;font-size:0.78rem">{days} days from today</div>',
-                                    unsafe_allow_html=True)
-                except: pass
-            else:
-                st.markdown(
-                    '<div style="color:#64748b;font-size:0.78rem">Unable to parse. Visit '
-                    '<a href="https://www.rba.gov.au/schedules-events/" target="_blank" '
-                    'style="color:#4a9af5">RBA Schedules and Events</a></div>',
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown('<div class="data-panel">'
+                    '<div class="data-panel-title">Current RBA Cash Rate</div>',
                     unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with c3:
-            st.markdown('<div class="data-panel">'
-                        '<div class="data-panel-title">ASX Rate Tracker</div>',
+        if rate:
+            st.markdown(f'<div style="font-size:2rem;font-weight:700;color:#4a9af5">'
+                        f'{fp(rate)}</div>', unsafe_allow_html=True)
+            history = ss._rba_history
+            if len(history) >= 2:
+                last = history[-1]
+                d_str = last["date"].strftime("%d %b %Y")
+                if last["delta"] > 0:
+                    st.markdown(f'<div class="rate-up">▲ +{last["delta"]:.2f}% on {d_str}</div>',
+                                unsafe_allow_html=True)
+                elif last["delta"] < 0:
+                    st.markdown(f'<div class="rate-dn">▼ {last["delta"]:.2f}% on {d_str}</div>',
+                                unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="rate-nc">Unchanged as of {d_str}</div>',
+                                unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="color:#64748b">Unable to fetch — see rba.gov.au</div>',
                         unsafe_allow_html=True)
-            asx = ss._asx_data
-            if asx and "futures_price" in asx:
-                fp_val = asx["futures_price"]
-                iy_val = round(100 - fp_val, 4)
-                src = asx.get("source", "")
-                st.markdown(
-                    f'<div style="color:#30d996;font-size:0.82rem;font-weight:600">'
-                    f'IB Futures: {fp_val:.2f}</div>'
-                    f'<div style="color:#4a9af5;font-size:1.1rem;font-weight:700">'
-                    f'Implied Rate: {iy_val:.2f}%</div>'
-                    f'<div style="color:#64748b;font-size:0.7rem">Source: {src}</div>',
-                    unsafe_allow_html=True)
-                if "probability" in asx:
-                    prob = asx["probability"] * 100 if asx["probability"] <= 1 else asx["probability"]
-                    st.markdown(
-                        f'<div style="color:#f5a94a;font-size:0.85rem;margin-top:4px">'
-                        f'Rate change probability: <strong>{prob:.1f}%</strong></div>',
-                        unsafe_allow_html=True)
-            else:
-                st.markdown(
-                    '<div style="color:#64748b;font-size:0.78rem">Auto-fetch unavailable. '
-                    'Enter IB futures price manually below, or visit '
-                    '<a href="https://www.asx.com.au/markets/trade-our-derivatives-market/'
-                    'futures-market/rba-rate-tracker" target="_blank" '
-                    'style="color:#4a9af5">ASX Rate Tracker</a> or '
-                    '<a href="https://rba.isaacgross.net/" target="_blank" '
-                    'style="color:#4a9af5">rba.isaacgross.net</a></div>',
-                    unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        # Probability Calculator
-        st.markdown("<hr>", unsafe_allow_html=True)
-        st.markdown(
-            '<div style="color:#64748b;font-size:0.72rem;font-weight:600;text-transform:uppercase;'
-            'letter-spacing:.06em;margin-bottom:10px">ASX Target Rate Probability '
-            '(30-Day Interbank Cash Rate Futures)</div>',
-            unsafe_allow_html=True)
-        _asx = ss._asx_data
-        _def_ib = float(_asx.get("futures_price", 95.65)) if _asx else 95.65
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            ib_price = st.number_input("IB Futures Price", value=_def_ib,
-                                       min_value=90.0, max_value=100.0,
-                                       step=0.01, format="%.2f",
-                                       help="30-Day Interbank Cash Rate Futures price (e.g. 95.65 → implied 4.35%).")
-            implied_yield = round(100 - ib_price, 4)
-            computed("Implied Yield", fp(implied_yield), "= 100 − Futures Price")
-        with c2:
-            rt = st.number_input("Current Target Rate (%)", value=float(rate) if rate else 4.35,
-                                 min_value=0.0, max_value=30.0, step=0.25, format="%.2f",
-                                 help="Current RBA Target Cash Rate (less overnight differential).")
-        with c3:
-            rt1 = st.number_input("Expected New Rate (%)", value=round((rate or 4.35) - 0.25, 2),
-                                  min_value=0.0, max_value=30.0, step=0.25, format="%.2f",
-                                  help="Expected rate if RBA moves (typically ±0.25%).")
-        with c4:
-            nb_days = st.number_input("Days before RBA meeting", value=5,
-                                      min_value=1, max_value=30,
-                                      help="Days in current month before the RBA Board meeting.")
+    with c2:
+        st.markdown('<div class="data-panel">'
+                    '<div class="data-panel-title">Next Monetary Policy Decision</div>',
+                    unsafe_allow_html=True)
+        if meeting:
+            st.markdown(f'<div style="font-size:1.1rem;font-weight:600;color:#d4dbe8">'
+                        f'{meeting}</div>', unsafe_allow_html=True)
+            try:
+                dt = datetime.strptime(meeting, "%d %B %Y").date()
+                days = (dt - TODAY).days
+                if days > 0:
+                    st.markdown(f'<div style="color:#64748b;font-size:0.78rem">'
+                                f'{days} days from today</div>', unsafe_allow_html=True)
+            except: pass
+        else:
+            st.markdown(
+                '<div style="color:#64748b;font-size:0.78rem">Unable to parse. Visit '
+                '<a href="https://www.rba.gov.au/schedules-events/board-meeting-schedules.html" '
+                'target="_blank" style="color:#4a9af5">RBA Board Meeting Schedules</a></div>',
+                unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with c3:
+        st.markdown('<div class="data-panel">'
+                    '<div class="data-panel-title">ASX Rate Tracker (IB Futures)</div>',
+                    unsafe_allow_html=True)
+        if asx and "futures_price" in asx:
+            fp_val = asx["futures_price"]
+            iy_val = asx.get("implied_yield", round(100 - fp_val, 4))
+            ticker = asx.get("ticker", "")
+            src = asx.get("source", "")
+            data_date = asx.get("data_date", "")
+            st.markdown(
+                f'<div style="color:#30d996;font-size:0.82rem;font-weight:600">'
+                f'{ticker} → {fp_val:.2f}</div>'
+                f'<div style="color:#4a9af5;font-size:1.1rem;font-weight:700">'
+                f'Implied Rate: {iy_val:.2f}%</div>'
+                f'<div style="color:#64748b;font-size:0.7rem">'
+                f'Source: {src}{" · " + data_date if data_date else ""}</div>',
+                unsafe_allow_html=True)
+            if "probability" in asx:
+                prob = asx["probability"] * 100 if asx["probability"] <= 1 else asx["probability"]
+                st.markdown(
+                    f'<div style="color:#f5a94a;font-size:0.85rem;margin-top:4px">'
+                    f'Rate change probability: <strong>{prob:.1f}%</strong></div>',
+                    unsafe_allow_html=True)
+        else:
+            err = asx.get("yfinance_error", "") if asx else ""
+            err_line = (f'<div style="color:#64748b;font-size:0.68rem;margin-top:3px">'
+                       f'yfinance: {err}</div>') if err else ""
+            st.markdown(
+                f'<div style="color:#64748b;font-size:0.78rem">Auto-fetch unavailable — '
+                f'enter IB Futures Price manually below. '
+                f'<a href="https://www.asx.com.au/markets/trade-our-derivatives-market/'
+                f'futures-market/rba-rate-tracker" target="_blank" '
+                f'style="color:#4a9af5">ASX Rate Tracker</a></div>{err_line}',
+                unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Probability Calculator
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown(
+        '<div style="color:#64748b;font-size:0.72rem;font-weight:600;text-transform:uppercase;'
+        'letter-spacing:.06em;margin-bottom:10px">ASX Target Rate Probability '
+        '(30-Day Interbank Cash Rate Futures)</div>',
+        unsafe_allow_html=True)
+
+    # Default IB price = live value if available, else 95.65
+    _def_ib = float(asx.get("futures_price", 95.65)) if asx else 95.65
+    # Determine default days-before-meeting
+    _def_days = 5
+    if meeting:
         try:
-            days_in_month = 30
-            nb = nb_days / days_in_month
-            na = (days_in_month - nb_days) / days_in_month
-            X = implied_yield
-            denom = na * (rt1 - rt)
-            if abs(denom) > 1e-9:
-                p = round((X - rt * (nb + na)) / denom, 4)
-                p = max(0.0, min(1.0, p))
-                pct = p * 100
-                col_a, col_b, col_c = st.columns(3)
-                with col_a:
-                    trend_clr = "#e94560" if rt1 > rt else "#30d996"
-                    direction = "increase" if rt1 > rt else "decrease"
-                    st.markdown(
-                        f'<div class="cf"><div class="cf-lbl">Probability of rate {direction}</div>'
-                        f'<div class="cf-val" style="color:{trend_clr}">{pct:.1f}%</div>'
-                        f'<div class="cf-sub">p = (X − rt(nb+na)) / (na×(r(t+1)−rt))</div></div>',
-                        unsafe_allow_html=True)
-                with col_b:
-                    outlook = ("Increasing" if (pct > 60 and rt1 > rt)
-                              else ("Decreasing" if (pct > 60 and rt1 < rt) else "Stable / Uncertain"))
-                    oclr = {"Increasing": "#e94560", "Decreasing": "#30d996",
-                           "Stable / Uncertain": "#64748b"}[outlook]
-                    st.markdown(
-                        f'<div class="cf"><div class="cf-lbl">Rate Outlook</div>'
-                        f'<div class="cf-val" style="color:{oclr}">{outlook}</div></div>',
-                        unsafe_allow_html=True)
-                with col_c:
-                    st.markdown(
-                        f'<div class="cf"><div class="cf-lbl">nb / na fraction of month</div>'
-                        f'<div class="cf-val">{nb:.2f} / {na:.2f}</div></div>',
-                        unsafe_allow_html=True)
-        except Exception as e:
-            st.warning(f"Calculation error: {e}")
+            dt = datetime.strptime(meeting, "%d %B %Y").date()
+            _def_days = max(1, min(30, dt.day))
+        except: pass
 
-        # History chart
-        if ss._rba_history:
-            hist = ss._rba_history[-40:] if len(ss._rba_history) > 40 else ss._rba_history
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=[r["date"] for r in hist], y=[r["rate"] for r in hist],
-                name="Cash Rate Target", line=dict(color=C_ORIG, width=2, shape="hv"),
-                fill="tozeroy", fillcolor="rgba(74,154,245,0.06)",
-                hovertemplate="<b>%{y:.2f}%</b><br>%{x|%d %b %Y}<extra></extra>"))
-            fig.update_layout(**PLOT_BASE, title="RBA Cash Rate History",
-                              yaxis_title="Rate (%)")
-            fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.04))
-            st.plotly_chart(fig, use_container_width=True)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        ib_price = st.number_input("IB Futures Price", value=_def_ib,
+                                   min_value=90.0, max_value=100.0,
+                                   step=0.01, format="%.2f", key="rba_ib_price",
+                                   help="30-Day Interbank Cash Rate Futures price "
+                                        "(e.g. 95.65 → implied 4.35%).")
+        implied_yield = round(100 - ib_price, 4)
+        computed("Implied Yield", fp(implied_yield), "= 100 − Futures Price")
+    with c2:
+        rt = st.number_input("Current Target Rate (%)",
+                             value=float(rate) if rate else 4.35,
+                             min_value=0.0, max_value=30.0, step=0.25,
+                             format="%.2f", key="rba_rt",
+                             help="Current RBA Target Cash Rate.")
+    with c3:
+        rt1 = st.number_input("Expected New Rate (%)",
+                              value=round((rate or 4.35) - 0.25, 2),
+                              min_value=0.0, max_value=30.0, step=0.25,
+                              format="%.2f", key="rba_rt1",
+                              help="Expected rate if RBA moves (typically ±0.25%).")
+    with c4:
+        nb_days = st.number_input("Day of month of meeting", value=_def_days,
+                                  min_value=1, max_value=30, key="rba_nb_days",
+                                  help="Day of the month on which the RBA Board meets.")
+    try:
+        # Use calendar.monthrange for accurate days in meeting month if possible
+        days_in_month = 30
+        meeting_date = None
+        if meeting:
+            try:
+                meeting_date = datetime.strptime(meeting, "%d %B %Y").date()
+                days_in_month = calendar.monthrange(meeting_date.year,
+                                                    meeting_date.month)[1]
+            except: pass
+        # Per ASX formula: nb = days before meeting / month length; na = rest
+        nb = (nb_days - 1) / days_in_month
+        na = (days_in_month - nb_days + 1) / days_in_month
+        X = implied_yield
+        denom = na * (rt1 - rt)
+        if abs(denom) > 1e-9:
+            p = (X - rt * nb - rt * na) / denom
+            p = max(0.0, min(1.0, p))
+            pct = p * 100
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                trend_clr = "#e94560" if rt1 > rt else "#30d996"
+                direction = "increase" if rt1 > rt else "decrease"
+                st.markdown(
+                    f'<div class="cf"><div class="cf-lbl">Probability of rate {direction}</div>'
+                    f'<div class="cf-val" style="color:{trend_clr}">{pct:.1f}%</div>'
+                    f'<div class="cf-sub">p = (X − rt·nb − rt·na) / (na·(r(t+1) − rt))</div></div>',
+                    unsafe_allow_html=True)
+            with col_b:
+                outlook = ("Increasing" if (pct > 60 and rt1 > rt)
+                          else ("Decreasing" if (pct > 60 and rt1 < rt)
+                                else "Stable / Uncertain"))
+                oclr = {"Increasing": "#e94560", "Decreasing": "#30d996",
+                       "Stable / Uncertain": "#64748b"}[outlook]
+                st.markdown(
+                    f'<div class="cf"><div class="cf-lbl">Rate Outlook</div>'
+                    f'<div class="cf-val" style="color:{oclr}">{outlook}</div></div>',
+                    unsafe_allow_html=True)
+            with col_c:
+                st.markdown(
+                    f'<div class="cf"><div class="cf-lbl">nb / na (fraction of month)</div>'
+                    f'<div class="cf-val">{nb:.2f} / {na:.2f}</div>'
+                    f'<div class="cf-sub">{days_in_month} days in meeting month</div></div>',
+                    unsafe_allow_html=True)
+    except Exception as e:
+        st.warning(f"Calculation error: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # INPUT: ORIGINAL LOAN
@@ -1353,33 +1443,37 @@ def section_proposed():
         with c2:
             computed("Equivalent", f"{ss.p_term_mo/12:.1f} years")
 
-    # ── Interest Rates ────────────────────────────────────────────────────
+    # ── Interest Rates (two-column layout; each column contains rate, fees, ──
+    # ── computed rates. Fixed column also contains Fixed Period & Reversion) ──
     sec("Interest Rates")
 
-    # Match fee toggle ABOVE rates display (so computed rates reflect chosen fees)
+    # Match fees toggle — placed prominently above the two columns
     ss.p_fees_match = st.toggle(
         "Match Fixed Rate fees to Variable Rate fees",
         value=ss.p_fees_match, key="w_p_fm",
-        help="When enabled, Fixed component fees equal Variable fees. Disable to set them individually.")
+        help="When enabled (default), Fixed fees mirror Variable fees and their input "
+             "fields are disabled. Disable this toggle to set Fixed fees independently.")
 
-    # Compute both sets of rates using per-component fees
+    # Apply fee matching: when matched, Fixed fees follow Variable fees
     if ss.p_fees_match:
-        fix_mo, fix_setup = ss.p_var_fee_mo, ss.p_var_fee_setup
-    else:
-        fix_mo, fix_setup = ss.p_fix_fee_mo, ss.p_fix_fee_setup
+        ss.p_fix_fee_mo = ss.p_var_fee_mo
+        ss.p_fix_fee_setup = ss.p_var_fee_setup
+        ss.p_fix_fee_break = ss.p_var_fee_break
+        ss.p_fix_fee_other = ss.p_var_fee_other
 
+    # Compute comparison and effective rates using each component's own fees
     comp_var = comparison_rate_asic(ss.p_var_fee_setup, ss.p_var_fee_mo, ss.p_adv_var_rate)
     eff_var = effective_rate_calc(ss.p_loan_amt, ss.p_var_fee_setup,
                                    ss.p_var_fee_mo, ss.p_adv_var_rate, ss.p_term_mo)
-    comp_fix = comparison_rate_asic(fix_setup, fix_mo, ss.p_adv_fix_rate)
-    # Fixed-rate effective: calculated over fixed period only
+    comp_fix = comparison_rate_asic(ss.p_fix_fee_setup, ss.p_fix_fee_mo, ss.p_adv_fix_rate)
     fix_mo_period = ss.p_fix_yrs * 12
-    eff_fix = effective_rate_calc(ss.p_loan_amt, fix_setup, fix_mo,
+    eff_fix = effective_rate_calc(ss.p_loan_amt, ss.p_fix_fee_setup, ss.p_fix_fee_mo,
                                    ss.p_adv_fix_rate, fix_mo_period)
 
     if not ss.p_rev_rate_override:
         ss.p_rev_rate = round(eff_var, 4)
 
+    # Column headers
     h1, h2 = st.columns(2)
     h1.markdown('<div style="text-align:center;color:#30d996;font-size:0.75rem;font-weight:600;'
                 'padding:6px;background:#071a0f;border-radius:5px;margin-bottom:8px">'
@@ -1388,104 +1482,134 @@ def section_proposed():
                 'padding:6px;background:#1a0709;border-radius:5px;margin-bottom:8px">'
                 'FIXED RATE</div>', unsafe_allow_html=True)
 
+    # Two columns: each contains rate → fees → computed rates
+    # Fixed column ALSO contains Fixed Period and Reversion Rate
     c_v, c_f = st.columns(2)
+
     with c_v:
+        # Variable Rate inputs
         ss.p_adv_var_rate = st.number_input(
             "Advertised Variable Rate (% p.a.)", value=ss.p_adv_var_rate,
             min_value=0.0, max_value=30.0, step=0.01, format="%.4f", key="w_p_avr",
             help="Headline variable rate advertised by the lender, before fees.")
+
+        # Variable Rate fees (under the Variable column)
+        st.markdown('<div class="sub-title">Variable Rate Fees</div>', unsafe_allow_html=True)
+        ss.p_var_fee_mo = st.number_input("Monthly Fee ($)", value=ss.p_var_fee_mo,
+            min_value=0.0, step=1.0, key="w_p_var_fm",
+            help="Monthly account-keeping fee for the Variable component.")
+        ss.p_var_fee_setup = st.number_input("Setup / Establishment Fee ($)",
+            value=ss.p_var_fee_setup, min_value=0.0, step=100.0, key="w_p_var_fs",
+            help="One-off establishment fee for the Variable component.")
+        ss.p_var_fee_break = st.number_input("Breakage Fee ($)", value=ss.p_var_fee_break,
+            min_value=0.0, step=100.0, key="w_p_var_fb",
+            help="Exit or discharge fee if breaking the Variable component early.")
+        ss.p_var_fee_other = st.number_input("Other One-off Fee ($)", value=ss.p_var_fee_other,
+            min_value=0.0, step=100.0, key="w_p_var_fo",
+            help="Other one-off fees (valuation, legal, etc.) for the Variable component.")
+
+        # Computed rates for Variable
         computed("Comparison Variable Rate", fp(comp_var),
-                 "ASIC standard: $150k over 25yr, using Variable fees")
+                 "ASIC: $150k over 25yr, using Variable fees")
         computed("Effective Variable Rate", fp(eff_var),
-                 f"For ${ss.p_loan_amt:,.0f} over {ss.p_term_mo} months, using Variable fees")
+                 f"For ${ss.p_loan_amt:,.0f} over {ss.p_term_mo} months, Variable fees")
+
     with c_f:
+        # Fixed Rate inputs
         ss.p_adv_fix_rate = st.number_input(
             "Advertised Fixed Rate (% p.a.)", value=ss.p_adv_fix_rate,
             min_value=0.0, max_value=30.0, step=0.01, format="%.4f", key="w_p_afr",
-            help="Headline fixed rate advertised for the fixed period.")
-        computed("Comparison Fixed Rate", fp(comp_fix),
-                 "ASIC standard: $150k over 25yr, using Fixed fees")
-        computed("Effective Fixed Rate", fp(eff_fix),
-                 f"For ${ss.p_loan_amt:,.0f} over Fixed Period ({fix_mo_period} months), using Fixed fees")
+            help="Headline fixed rate advertised for the Fixed Period.")
 
-    c1, c2 = st.columns(2)
-    with c1:
+        # Fixed Period lives under the FIXED column (applies only to Fixed component)
         ss.p_fix_yrs = st.number_input(
             "Fixed Period (years)", value=ss.p_fix_yrs, min_value=1, max_value=30, step=1,
             key="w_p_fy",
-            help="Duration that the Fixed Rate applies. Applies ONLY to the Fixed component "
-                 "of the loan. Variable component uses the variable rate throughout.")
-    with c2:
+            help="Duration that the Fixed Rate applies. Applies ONLY to the Fixed "
+                 "component. Variable component uses the variable rate throughout.")
+
+        # Fixed Rate fees (under the Fixed column) — disabled when matched to Variable
+        st.markdown('<div class="sub-title">Fixed Rate Fees</div>', unsafe_allow_html=True)
+        if ss.p_fees_match:
+            # Show as read-only computed cards
+            computed("Monthly Fee", fc(ss.p_fix_fee_mo), "matched to Variable")
+            computed("Setup / Establishment Fee", fc(ss.p_fix_fee_setup),
+                     "matched to Variable")
+            computed("Breakage Fee", fc(ss.p_fix_fee_break), "matched to Variable")
+            computed("Other One-off Fee", fc(ss.p_fix_fee_other), "matched to Variable")
+        else:
+            ss.p_fix_fee_mo = st.number_input("Monthly Fee ($)", value=ss.p_fix_fee_mo,
+                min_value=0.0, step=1.0, key="w_p_fix_fm",
+                help="Monthly account-keeping fee for the Fixed component.")
+            ss.p_fix_fee_setup = st.number_input("Setup / Establishment Fee ($)",
+                value=ss.p_fix_fee_setup, min_value=0.0, step=100.0, key="w_p_fix_fs",
+                help="One-off establishment fee for the Fixed component.")
+            ss.p_fix_fee_break = st.number_input("Breakage Fee ($)",
+                value=ss.p_fix_fee_break, min_value=0.0, step=100.0, key="w_p_fix_fb",
+                help="Exit or discharge fee if breaking the Fixed component early.")
+            ss.p_fix_fee_other = st.number_input("Other One-off Fee ($)",
+                value=ss.p_fix_fee_other, min_value=0.0, step=100.0, key="w_p_fix_fo",
+                help="Other one-off fees for the Fixed component.")
+
+        # Computed rates for Fixed
+        computed("Comparison Fixed Rate", fp(comp_fix),
+                 "ASIC: $150k over 25yr, using Fixed fees")
+        computed("Effective Fixed Rate", fp(eff_fix),
+                 f"For ${ss.p_loan_amt:,.0f} over Fixed Period ({fix_mo_period} months), "
+                 "Fixed fees")
+
+        # Reversion rate (after Fixed Period ends, Fixed component reverts to variable)
         ss.p_rev_rate_override = st.toggle(
             "Override reversion rate", value=ss.p_rev_rate_override, key="w_p_rro",
-            help="By default the reversion rate equals the Effective Variable Rate. "
-                 "Enable to set a custom (typically lower) rate.")
+            help="By default, reversion rate = Effective Variable Rate. Enable to set "
+                 "a custom rate.")
         if ss.p_rev_rate_override:
-            ss.p_rev_rate = st.number_input("Reversion Rate (% p.a.)", value=ss.p_rev_rate,
-                min_value=0.0, max_value=30.0, step=0.01, format="%.4f", key="w_p_rr_ov",
+            ss.p_rev_rate = st.number_input("Reversion Rate (% p.a.)",
+                value=ss.p_rev_rate, min_value=0.0, max_value=30.0, step=0.01,
+                format="%.4f", key="w_p_rr_ov",
                 help="Rate the Fixed component reverts to after the Fixed Period expires.")
         else:
             computed("Reversion Rate", fp(ss.p_rev_rate),
-                     "Auto-filled to Effective Variable Rate")
+                     "Auto-filled from Effective Variable Rate")
 
-    # ── Fees (MOVED UP: before Variable/Fixed Split) ──────────────────────
-    sec("Fees")
-    st.markdown('<div class="sub-title">Variable Rate Fees</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        ss.p_var_fee_mo = st.number_input("Monthly Fee ($)", value=ss.p_var_fee_mo,
-            min_value=0.0, step=1.0, key="w_p_var_fm")
-    with c2:
-        ss.p_var_fee_setup = st.number_input("Setup Fee ($)", value=ss.p_var_fee_setup,
-            min_value=0.0, step=100.0, key="w_p_var_fs")
-    with c3:
-        ss.p_var_fee_break = st.number_input("Breakage Fee ($)", value=ss.p_var_fee_break,
-            min_value=0.0, step=100.0, key="w_p_var_fb")
-    with c4:
-        ss.p_var_fee_other = st.number_input("Other One-off Fee ($)", value=ss.p_var_fee_other,
-            min_value=0.0, step=100.0, key="w_p_var_fo")
+    # ── Refinancing Strategy (moved from Scenarios — now a Proposed Loan subsection) ──
+    sec("Refinancing Strategy")
+    strategies = ["Conservative (80% Fixed)", "Balanced (Optimal Split)",
+                  "Aggressive (0% Fixed)", "Manual"]
+    if ss.strategy not in strategies:
+        ss.strategy = "Balanced (Optimal Split)"
+    ss.strategy = st.radio(
+        "Select strategy", strategies, index=strategies.index(ss.strategy),
+        key="w_strat", horizontal=True,
+        help="Determines the Fixed/Variable split. Balanced finds the optimal split "
+             "minimising interest + remaining balance at end of Fixed Period. "
+             "Manual enables the slider below for custom allocation.")
 
-    st.markdown('<div class="sub-title">Fixed Rate Fees</div>', unsafe_allow_html=True)
-    if ss.p_fees_match:
-        ss.p_fix_fee_mo = ss.p_var_fee_mo
-        ss.p_fix_fee_setup = ss.p_var_fee_setup
-        ss.p_fix_fee_break = ss.p_var_fee_break
-        ss.p_fix_fee_other = ss.p_var_fee_other
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: computed("Monthly Fee", fc(ss.p_fix_fee_mo), "matched to Variable")
-        with c2: computed("Setup Fee", fc(ss.p_fix_fee_setup), "matched to Variable")
-        with c3: computed("Breakage Fee", fc(ss.p_fix_fee_break), "matched to Variable")
-        with c4: computed("Other Fee", fc(ss.p_fix_fee_other), "matched to Variable")
-    else:
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            ss.p_fix_fee_mo = st.number_input("Monthly Fee ($)", value=ss.p_fix_fee_mo,
-                min_value=0.0, step=1.0, key="w_p_fix_fm")
-        with c2:
-            ss.p_fix_fee_setup = st.number_input("Setup Fee ($)", value=ss.p_fix_fee_setup,
-                min_value=0.0, step=100.0, key="w_p_fix_fs")
-        with c3:
-            ss.p_fix_fee_break = st.number_input("Breakage Fee ($)", value=ss.p_fix_fee_break,
-                min_value=0.0, step=100.0, key="w_p_fix_fb")
-        with c4:
-            ss.p_fix_fee_other = st.number_input("Other One-off Fee ($)", value=ss.p_fix_fee_other,
-                min_value=0.0, step=100.0, key="w_p_fix_fo")
-
-    # ── Variable / Fixed Split ────────────────────────────────────────────
-    sec("Variable / Fixed Split")
-    ss.p_split_auto = st.toggle(
-        "Auto-calculate optimal split", value=ss.p_split_auto, key="w_p_sa",
-        help="The optimal split minimises cumulative interest + closing balance at end of "
-             "the Fixed Period. Evaluated in 0.1% increments across 1,001 combinations.")
-    if not ss.p_split_auto:
+    # Strategy determines split %
+    if ss.strategy == "Conservative (80% Fixed)":
+        ss.p_split_pct = 80.0; ss.p_split_auto = False
+        computed("Fixed Component (locked by strategy)", fp(ss.p_split_pct, 1),
+                 f"Variable ${ss.p_loan_amt*0.2:,.0f} / Fixed ${ss.p_loan_amt*0.8:,.0f}")
+    elif ss.strategy == "Balanced (Optimal Split)":
+        ss.p_split_auto = True
+        st.markdown('<div class="note">Optimal fixed percentage is computed below '
+                    'from the objective curve. Adjust Fixed Period to see how the '
+                    'optimum shifts.</div>', unsafe_allow_html=True)
+    elif ss.strategy == "Aggressive (0% Fixed)":
+        ss.p_split_pct = 0.0; ss.p_split_auto = False
+        computed("Fixed Component (locked by strategy)", fp(ss.p_split_pct, 1),
+                 f"Variable ${ss.p_loan_amt:,.0f} / Fixed $0")
+    else:  # Manual
+        ss.p_split_auto = False
         c1, c2 = st.columns(2)
         with c1:
             ss.p_split_pct = st.slider("Fixed Component (%)", 0.0, 100.0,
-                ss.p_split_pct, 0.5, key="w_p_sp")
+                ss.p_split_pct, 0.5, key="w_p_sp",
+                help="Manual allocation percentage for the Fixed component.")
         with c2:
             computed("Allocation",
-                     f"Variable {fc(ss.p_loan_amt*(100-ss.p_split_pct)/100)} / "
-                     f"Fixed {fc(ss.p_loan_amt*ss.p_split_pct/100)}")
+                     f"Variable ${ss.p_loan_amt*(100-ss.p_split_pct)/100:,.0f} / "
+                     f"Fixed ${ss.p_loan_amt*ss.p_split_pct/100:,.0f}")
 
     # Variable rate changes (shared, read-only display)
     st.markdown('<div class="sub-title">Variable Rate Changes '
@@ -1520,8 +1644,8 @@ def section_proposed():
     ss.p_off_match = st.toggle(
         "Match Current Balance to Current Loan Offset Account",
         value=ss.p_off_match, key="w_p_om_match",
-        help="When enabled, the Current Balance of the proposed offset equals the Current "
-             "Loan's offset initial balance.")
+        help="When enabled, the Current Balance of the proposed offset equals the "
+             "Current Loan's offset initial balance.")
     c1, c2, c3 = st.columns(3)
     with c1:
         if ss.p_off_match:
@@ -1541,67 +1665,63 @@ def section_proposed():
             help="Defaults to Proposed Settlement Date.")
     with c3:
         ss.p_off_monthly = st.number_input("Monthly Addition ($)", value=ss.p_off_monthly,
-            min_value=0.0, step=100.0, key="w_p_om")
+            min_value=0.0, step=100.0, key="w_p_om",
+            help="Automatic monthly contribution to the offset account.")
     lump_list("p_off_lumps", "Offset Lump Sum Deposits")
 
     # Extra Repayments / Redraws
     extra_repay_list("p_extra_repay", "Extra Repayments and Redraws")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# INPUT: STRATEGY
+# INPUT: SCENARIOS (formerly Strategy and Scenarios)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def section_strategy():
+def section_scenarios():
+    """Scenarios section — merges RBA Cash Rate & Market Indicators panel with
+       the RBA cash-rate scenario slider and the payment-behaviour toggle.
+       Refinancing Strategy has been moved into the Proposed Loan section."""
     ss = st.session_state
     rba_rate = ss._rba_rate
 
-    if rba_rate:
-        st.markdown(
-            f'<div class="data-panel">'
-            f'<div class="data-panel-title">Current RBA Cash Rate</div>'
-            f'<span style="font-size:1.8rem;font-weight:700;color:#4a9af5">{fp(rba_rate)}</span>'
-            f'</div>', unsafe_allow_html=True)
+    # ── RBA Cash Rate and Market Indicators (embedded, not its own expander) ──
+    render_rba_panel()
 
-    if ss._rba_next_meeting:
-        st.markdown(
-            f'<div class="note">Next RBA Monetary Policy Decision: '
-            f'<strong>{ss._rba_next_meeting}</strong></div>',
-            unsafe_allow_html=True)
+    st.markdown("<hr>", unsafe_allow_html=True)
 
-    sec("Strategy (User Defined)")
-    strategies = ["Conservative (80% fixed)", "Balanced (optimal split)", "Aggressive (0% fixed)"]
-    if ss.strategy not in strategies:
-        ss.strategy = "Balanced (optimal split)"
-    ss.strategy = st.radio(
-        "Select refinancing strategy", strategies, index=strategies.index(ss.strategy),
-        key="w_strat", horizontal=True,
-        help="User-defined preference. Dashboard shows all three strategies regardless of selection.")
-
+    # ── Payment Behaviour toggle ──────────────────────────────────────────
     sec("Payment Behaviour on Rate Changes")
     ss.maintain_pmt = st.toggle(
         "When rates fall, maintain current repayment (pays off faster)",
         value=ss.maintain_pmt, key="w_mp",
-        help="When rates rise, repayments always increase to maintain remaining term (term can only "
-             "decrease). When rates fall: ON → keep paying current amount, loan shortens. "
-             "OFF → drop to new minimum, loan term preserved.")
+        help="When rates rise, repayments always increase to maintain the remaining term "
+             "(term can only decrease). When rates fall: ON → keep paying the current "
+             "amount, loan shortens. OFF → drop to the new minimum, loan term preserved.")
     st.markdown(
-        '<div class="note">This setting takes effect in scenarios where rates fall '
-        '(e.g. −0.25%, −0.50% scenarios on the Rate Scenarios tab, or negative RBA movements, '
-        'or negative anticipated rate changes in the Current Loan section).</div>',
+        '<div class="note">Applies to scenarios where rates fall — negative RBA '
+        'movements below, negative anticipated rate changes in Current Loan, and '
+        'the −0.25% / −0.50% scenarios on the Rate Scenarios dashboard tab.</div>',
         unsafe_allow_html=True)
 
-    sec("RBA Cash Rate Scenario (on top of any changes in Current / Proposed sections)")
+    # ── RBA Cash Rate Scenario ────────────────────────────────────────────
+    sec("RBA Cash Rate Scenario")
+    st.markdown(
+        '<div class="note">Applies on top of any changes already entered in Current '
+        'Loan or Proposed Loan. Flows into all Variable-rate calculations — '
+        'including the Original Loan when Current is treated as a continuation. '
+        'Does not affect Fixed rates during the Fixed Period (but does apply to '
+        'the Fixed component after it reverts to variable).</div>',
+        unsafe_allow_html=True)
     c1, c2 = st.columns([4, 1])
     with c1:
         ss.rba_bps = st.slider(
             "RBA cash rate change (basis points)", -300, 300, ss.rba_bps, 25, key="w_rba",
-            help="Additional change applied on top of any rate changes already entered in "
-                 "Current and Proposed Loan sections.")
+            help="Additional change applied from today onwards on top of any rate "
+                 "changes already entered in Current and Proposed Loan sections.")
         if ss.rba_bps != 0:
             d = "increase" if ss.rba_bps > 0 else "decrease"
             st.markdown(
-                f'<div class="note">Applies an additional {abs(ss.rba_bps)} bps '
-                f'({abs(ss.rba_bps)/100:.2f}%) {d} on top of existing anticipated changes.</div>',
+                f'<div class="note">Applying an additional {abs(ss.rba_bps)} bps '
+                f'({abs(ss.rba_bps)/100:.2f}%) {d} immediately.</div>',
                 unsafe_allow_html=True)
     with c2:
         if rba_rate:
@@ -1625,8 +1745,20 @@ def compute_all():
     def extra_t(lumps, loan_start):
         return deltas_to_lumps_t(lumps, loan_start)
 
+    # RBA scenario delta is applied at the START of the current month so the
+    # amortization loop's period-reference picks it up in the period containing
+    # TODAY. This ensures the first forward-looking row (Date >= today) reflects
+    # the scenario on the Dashboard Overview.
+    rba_delta_pct = ss.rba_bps / 100.0 if ss.rba_bps != 0 else 0.0
+    _start_of_month = date(TODAY.year, TODAY.month, 1)
+
     # ── Original ──
-    o_rsched = build_rate_schedule(ss.o_rate, ss.o_rate_deltas)
+    # If Current is a continuation of Original, the RBA scenario also affects Original
+    # (since Original is still this loan, just before refinance). Apply at start-of-month.
+    o_deltas = list(ss.o_rate_deltas)
+    if ss.c_is_cont and rba_delta_pct != 0:
+        o_deltas = o_deltas + [[max(_start_of_month, ss.o_balance_date), rba_delta_pct]]
+    o_rsched = build_rate_schedule(ss.o_rate, o_deltas)
     df_orig = amortize(
         ss.o_balance, ss.o_balance_date, ss.o_term_mo,
         o_rsched, ss.o_off_init, ss.o_off_monthly,
@@ -1650,8 +1782,8 @@ def compute_all():
         c_bal = ss.c_balance
         c_fee_mo = ss.c_fee_mo
     all_c_deltas = list(c_hist) + list(ss.future_var_deltas)
-    if ss.rba_bps != 0:
-        all_c_deltas = all_c_deltas + [[add_months(TODAY, 1), ss.rba_bps / 100]]
+    if rba_delta_pct != 0:
+        all_c_deltas = all_c_deltas + [[max(_start_of_month, c_start), rba_delta_pct]]
     c_rsched = build_rate_schedule(c_base_rate, all_c_deltas)
     df_curr = amortize(
         c_bal, c_start, c_term, c_rsched,
@@ -1689,15 +1821,21 @@ def compute_all():
     p_f = ss.p_loan_amt * best_pct / 100
     p_v = ss.p_loan_amt * (100 - best_pct) / 100
 
-    # Variable component: uses shared future_var_deltas + RBA scenario
+    # Variable component: uses shared future_var_deltas + RBA scenario (applied
+    # at start-of-month or settlement, whichever is later, for consistent forward
+    # payment reflection on Dashboard metrics)
     p_var_deltas = list(ss.future_var_deltas)
-    if ss.rba_bps != 0:
-        p_var_deltas = p_var_deltas + [[add_months(TODAY, 1), ss.rba_bps / 100]]
+    if rba_delta_pct != 0:
+        p_var_deltas = p_var_deltas + [[max(_start_of_month, ss.p_start_date), rba_delta_pct]]
     p_vsched = build_rate_schedule(ss.p_adv_var_rate, p_var_deltas)
 
-    # Fixed component: uses fixed rate for fix_mo_period, then reverts to p_rev_rate
+    # Fixed component: uses fixed rate for fix_mo_period, then reverts to p_rev_rate.
+    # After revert, the Fixed component effectively becomes variable — so we also
+    # apply the RBA delta to the reversion rate (Fixed is not affected DURING the
+    # fixed period, but IS affected after revert).
     fix_rev_date = add_months(TODAY, fix_mo_period)
-    p_fsched = [(date(1900, 1, 1), ss.p_adv_fix_rate), (fix_rev_date, ss.p_rev_rate)]
+    eff_rev_rate = ss.p_rev_rate + (rba_delta_pct if rba_delta_pct != 0 else 0.0)
+    p_fsched = [(date(1900, 1, 1), ss.p_adv_fix_rate), (fix_rev_date, eff_rev_rate)]
 
     p_lumps_t = lumps_t(ss.p_off_lumps, TODAY)
     p_extra_t = extra_t(ss.p_extra_repay, TODAY)
@@ -1752,7 +1890,19 @@ def dash_overview(R):
 
     def val(df, field):
         if df is None or df.empty: return None
-        if field == "payment": return df["Payment"].iloc[0]
+        if field == "payment":
+            # Use first forward-looking row (Date >= today) so the RBA scenario
+            # visibly affects the Monthly Payment metric for Original/Current
+            # (which may have started in the past). Falls back to iloc[0].
+            try:
+                # Date column holds datetime.date objects; use apply for robust comparison
+                mask = df["Date"].apply(lambda d: d >= TODAY)
+                fwd = df[mask]
+                if not fwd.empty:
+                    return fwd["Payment"].iloc[0]
+            except Exception:
+                pass
+            return df["Payment"].iloc[0]
         if field == "int": return df["Cum Interest"].iloc[-1]
         if field == "cost": return df["Cum Paid"].iloc[-1]
         if field == "term": return len(df)
@@ -1984,7 +2134,12 @@ def dash_split(R):
     st.markdown(
         f'<div class="note">Optimal fixed component: <strong>{best:.1f}%</strong> '
         f'({100-best:.1f}% variable). Evaluated across 1,001 scenarios '
-        f'(0.0% → 100.0% in 0.1% steps) over the {ss.p_fix_yrs}-year fixed period.</div>',
+        f'(0.0% → 100.0% in 0.1% steps) over the <strong>{ss.p_fix_yrs}-year</strong> '
+        f'fixed period. The objective surface is driven by the Fixed vs Variable rate '
+        f'differential; when one rate is clearly cheaper, the optimum sits at the '
+        f'corresponding extreme. The Fixed Period scales the magnitude of this '
+        f'differential — longer periods amplify the cost gap. Change "Fixed Period '
+        f'(years)" in the Proposed Loan section to see the curve reshape.</div>',
         unsafe_allow_html=True)
 
     # Summary metrics
@@ -1998,13 +2153,48 @@ def dash_split(R):
     with c4: st.markdown(metric_card("Min Objective", fc(best_row["Objective"])),
                          unsafe_allow_html=True)
 
-    # ── Chart 1: Single clear objective curve with optimal marked ──
+    # ── Chart 1: Objective curve with best-fit polynomial overlay & nadir marker ──
     fig1 = go.Figure()
+    # Raw data points
     fig1.add_trace(go.Scatter(
-        x=sdf["Fixed %"], y=sdf["Objective"], name="Total Cost (Interest + End Balance)",
+        x=sdf["Fixed %"], y=sdf["Objective"],
+        name="Total Cost (1,001 points)",
         line=dict(color=C_SPLIT, width=2.5),
         fill="tozeroy", fillcolor="rgba(196,122,245,0.08)",
         hovertemplate="Fixed: %{x:.1f}%<br>Total: $%{y:,.0f}<extra></extra>"))
+    # Polynomial best-fit (cubic or quartic captures U-shape without overfitting)
+    try:
+        x = sdf["Fixed %"].values
+        y = sdf["Objective"].values
+        # Try quartic fit; if the curve is nearly linear (e.g. rates barely differ),
+        # fall back to quadratic
+        coeffs = np.polyfit(x, y, 4)
+        y_fit = np.polyval(coeffs, x)
+        # Find fitted nadir (derivative = 0 within [0, 100])
+        deriv = np.polyder(coeffs)
+        roots = np.roots(deriv)
+        real_roots = [r.real for r in roots if abs(r.imag) < 1e-6 and 0 <= r.real <= 100]
+        fit_nadir_pct = None
+        if real_roots:
+            # Pick root where second derivative > 0 (minimum)
+            d2 = np.polyder(deriv)
+            minima = [r for r in real_roots if np.polyval(d2, r) > 0]
+            if minima:
+                fit_nadir_pct = min(minima, key=lambda r: np.polyval(coeffs, r))
+        fig1.add_trace(go.Scatter(
+            x=x, y=y_fit, name="Best-fit curve (quartic)",
+            line=dict(color=C_ORIG, width=1.5, dash="dot"),
+            hovertemplate="Fixed: %{x:.1f}%<br>Fit: $%{y:,.0f}<extra></extra>"))
+        if fit_nadir_pct is not None:
+            fig1.add_trace(go.Scatter(
+                x=[fit_nadir_pct], y=[np.polyval(coeffs, fit_nadir_pct)],
+                mode="markers", marker=dict(symbol="circle-open", size=14,
+                                            color=C_ORIG, line=dict(width=2)),
+                name=f"Fitted nadir: {fit_nadir_pct:.1f}%",
+                hovertemplate="Fitted nadir<br>Fixed: %{x:.1f}%<extra></extra>"))
+    except Exception:
+        pass
+    # True discrete nadir from 1,001-point evaluation
     fig1.add_trace(go.Scatter(
         x=[best], y=[best_row["Objective"]], mode="markers+text",
         marker=dict(symbol="diamond", size=18, color=C_FIX,
@@ -2013,7 +2203,8 @@ def dash_split(R):
         text=[f"Optimal {best:.1f}%"], textposition="top center",
         textfont=dict(color=C_FIX, size=12, family="Inter")))
     fig1.update_layout(**PLOT_BASE,
-        title="Total Cost by Fixed Component % (Cumulative Interest + End Balance at end of Fixed Period)",
+        title=f"Total Cost by Fixed Component % at end of {ss.p_fix_yrs}-year Fixed Period "
+              "(Cumulative Interest + Remaining Balance)",
         xaxis_title="Fixed Component (%)", yaxis_title="Total Cost ($)")
     st.plotly_chart(fig1, use_container_width=True)
 
@@ -2089,13 +2280,15 @@ def dash_strategy_tab(R):
     fix_mo = ss.p_fix_yrs * 12
     best = R["best_pct"]
 
-    strat_map = {"Conservative (80% fixed)": 80.0,
-                 "Balanced (optimal split)": best,
-                 "Aggressive (0% fixed)": 0.0}
+    strat_map = {"Conservative (80% Fixed)": 80.0,
+                 "Balanced (Optimal Split)": best,
+                 "Aggressive (0% Fixed)": 0.0,
+                 "Manual": ss.p_split_pct}
     sel_pct = strat_map.get(ss.strategy, best)
     st.markdown(
-        f'<div class="note-ok">Selected strategy: <strong>{ss.strategy}</strong> — '
-        f'{sel_pct:.1f}% fixed / {100-sel_pct:.1f}% variable</div>',
+        f'<div class="note-ok">Selected strategy (set in Proposed Loan section): '
+        f'<strong>{ss.strategy}</strong> — {sel_pct:.1f}% fixed / '
+        f'{100-sel_pct:.1f}% variable</div>',
         unsafe_allow_html=True)
 
     strats = {"Conservative\n(80% Fixed)": (80.0, C_FIX),
@@ -2246,16 +2439,14 @@ def main():
         </p>
     </div>""", unsafe_allow_html=True)
 
-    render_rba_panel()
-
     with st.expander("Original Loan", expanded=True):
         section_original()
     with st.expander("Current Loan", expanded=True):
         section_current()
     with st.expander("Proposed Loan", expanded=True):
         section_proposed()
-    with st.expander("Strategy and Scenarios", expanded=True):
-        section_strategy()
+    with st.expander("Scenarios", expanded=True):
+        section_scenarios()
 
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
     c1, _ = st.columns([1, 7])
