@@ -1905,17 +1905,19 @@ def forensic_compute(R):
     df_pv, df_pf = R["df_pv"], R["df_pf"]
 
     rba_rate = ss._rba_rate if ss._rba_rate else 4.35  # sensible fallback
+    rba_delta_pct = ss.rba_bps / 100.0 if ss.rba_bps != 0 else 0.0
 
-    # Current loan headline rate (after deltas to today)
+    # Current loan headline rate (after deltas to today + RBA scenario)
+    # RBA scenario affects variable rates — current loan is variable
     if ss.c_is_cont:
-        c_rate = eff_rate_from_deltas(ss.o_rate, ss.o_rate_deltas, as_of=TODAY)
+        c_rate = eff_rate_from_deltas(ss.o_rate, ss.o_rate_deltas, as_of=TODAY) + rba_delta_pct
         c_bal = ss.o_balance
         c_fee_mo = ss.o_fee_mo
         c_setup = 0.0
         c_break = ss.o_fee_break
         c_term_rem = max(0, ss.o_term_mo - months_between(ss.o_balance_date, TODAY))
     else:
-        c_rate = ss.c_rate
+        c_rate = ss.c_rate + rba_delta_pct
         c_bal = ss.c_balance
         c_fee_mo = ss.c_fee_mo
         c_setup = ss.c_fee_setup
@@ -1923,8 +1925,10 @@ def forensic_compute(R):
         c_term_rem = ss.c_term_mo
 
     # Proposed headline — weighted by split
+    # Variable side gets RBA delta; Fixed side does NOT (fixed is immune during fix period)
     best_pct = R["best_pct"]
-    p_blended_rate = (best_pct/100)*ss.p_adv_fix_rate + (1-best_pct/100)*ss.p_adv_var_rate
+    p_var_with_rba = ss.p_adv_var_rate + rba_delta_pct
+    p_blended_rate = (best_pct/100)*ss.p_adv_fix_rate + (1-best_pct/100)*p_var_with_rba
     p_eff_var = R["eff_var"]
     p_eff_fix = R["eff_fix"]
 
@@ -1968,10 +1972,11 @@ def forensic_compute(R):
 
     def stress_interest(pct_fixed, with_offset, fix_rate, var_rate, fix_period_mo,
                           full_term_mo, horizon):
-        """Return cumulative interest over `horizon` months for a given config."""
+        """Return cumulative interest over `horizon` months for a given config.
+           `pct_fixed` is a FRACTION 0.0-1.0, not a percentage."""
         loan = ss.p_loan_amt
-        p_f = loan * pct_fixed / 100
-        p_v = loan * (1 - pct_fixed / 100)
+        p_f = loan * pct_fixed
+        p_v = loan * (1 - pct_fixed)
         # Fixed side: no offset (offset lives on variable side only)
         bf, cif = fast_partial(p_f, fix_rate, full_term_mo,
                                min(horizon, fix_period_mo)) if p_f > 0 else (0, 0)
@@ -1987,11 +1992,11 @@ def forensic_compute(R):
             civ = 0
         return cif + civ
 
-    scen_split = stress_interest(best_pct/100, True, ss.p_adv_fix_rate, ss.p_adv_var_rate,
+    scen_split = stress_interest(best_pct/100, True, ss.p_adv_fix_rate, p_var_with_rba,
                                   ss.p_fix_yrs*12, ss.p_term_mo, horizon_mo)
-    scen_var_off = stress_interest(0.0, True, ss.p_adv_fix_rate, ss.p_adv_var_rate,
+    scen_var_off = stress_interest(0.0, True, ss.p_adv_fix_rate, p_var_with_rba,
                                     ss.p_fix_yrs*12, ss.p_term_mo, horizon_mo)
-    scen_all_fix = stress_interest(1.0, False, ss.p_adv_fix_rate, ss.p_adv_var_rate,
+    scen_all_fix = stress_interest(1.0, False, ss.p_adv_fix_rate, p_var_with_rba,
                                     ss.p_fix_yrs*12, ss.p_term_mo, horizon_mo)
     # The "Offset Disaster" delta
     disaster_cost = scen_all_fix - scen_split
@@ -2024,12 +2029,16 @@ def forensic_compute(R):
     months_snowball = _days_saved_snowball(df_c, df_ps)
 
     # Recompute scenario: same proposed BUT floor payment at current payment
-    # to show the true snowball
+    # to show the true snowball. RBA delta applied to variable side at start of current month
+    # (matching the convention used in compute_all).
     snowball_months_saved = 0
     snowball_interest_saved = 0
     try:
         if curr_pmt > prop_pmt and ss.p_loan_amt > 0:
+            _som = date(TODAY.year, TODAY.month, 1)
             p_var_deltas = list(ss.future_var_deltas)
+            if rba_delta_pct != 0:
+                p_var_deltas = p_var_deltas + [[max(_som, ss.p_start_date), rba_delta_pct]]
             vsched = build_rate_schedule(ss.p_adv_var_rate, p_var_deltas)
             df_snow = amortize(ss.p_loan_amt, ss.p_start_date, ss.p_term_mo,
                                vsched, off_prop, ss.p_off_monthly,
@@ -2426,10 +2435,14 @@ def theme_iv_forecast(R, F):
                                   line=dict(color=C_SPLIT, width=2),
                                   fill="tozeroy", fillcolor="rgba(196,122,245,0.05)",
                                   hovertemplate="Proposed<br>%{x|%b %Y}<br>$%{y:,.0f}<extra></extra>"))
-        # Snowball overlay
+        # Snowball overlay — include RBA bps delta on variable side
         try:
             if F["curr_pmt"] > F["prop_pmt"]:
+                _rba_pct = ss.rba_bps / 100.0 if ss.rba_bps != 0 else 0.0
+                _som = date(TODAY.year, TODAY.month, 1)
                 p_var_deltas = list(ss.future_var_deltas)
+                if _rba_pct != 0:
+                    p_var_deltas = p_var_deltas + [[max(_som, ss.p_start_date), _rba_pct]]
                 vsched = build_rate_schedule(ss.p_adv_var_rate, p_var_deltas)
                 df_snow = amortize(ss.p_loan_amt, ss.p_start_date, ss.p_term_mo,
                                     vsched, F["off_prop"], ss.p_off_monthly,
