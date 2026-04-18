@@ -748,51 +748,55 @@ def init_state():
     _d("o_prop_val", 800_000.0); _d("o_prop_date", date(2020, 1, 15))
     _d("o_loan_amt", 640_000.0); _d("o_loan_date", date(2020, 1, 15))
     _d("o_use_dates", False); _d("o_end_date", date(2045, 1, 15))
-    _d("o_term_mo", 300); _d("o_balance", 580_000.0)
-    _d("o_balance_date", TODAY); _d("o_rate", 6.50)
+    # ── Original Loan ──
+    _d("o_prop_val", 1_637_000.0); _d("o_prop_date", date(2024, 1, 8))
+    _d("o_loan_amt", 1_300_000.0); _d("o_loan_date", date(2024, 1, 8))
+    _d("o_use_dates", True); _d("o_end_date", date(2044, 12, 8))
+    _d("o_term_mo", 251); _d("o_balance", 1_130_000.0)
+    _d("o_balance_date", TODAY); _d("o_rate", 6.13)
     _d("o_rate_deltas", [])
     _d("o_off_init", 0.0); _d("o_off_date", TODAY)
     _d("o_off_monthly", 0.0); _d("o_off_lumps", [])
-    _d("o_extra_repay", [])  # NEW
+    _d("o_extra_repay", [])
     _d("o_fee_mo", 10.0); _d("o_fee_setup", 0.0)
     _d("o_fee_break", 0.0); _d("o_fee_other", 0.0)
 
     # ── Current Loan ──
-    _d("c_is_cont", True); _d("c_prop_val", 800_000.0); _d("c_prop_date", TODAY)
-    _d("c_balance", 580_000.0); _d("c_rate", 6.50)
-    _d("c_use_dates", False); _d("c_end_date", date(2045, 1, 15)); _d("c_term_mo", 300)
+    _d("c_is_cont", True); _d("c_prop_val", 1_637_000.0); _d("c_prop_date", TODAY)
+    _d("c_balance", 1_130_000.0); _d("c_rate", 5.89)
+    _d("c_use_dates", True); _d("c_end_date", date(2044, 12, 8)); _d("c_term_mo", 251)
     _d("c_rate_deltas", [])
     _d("c_off_init", 0.0); _d("c_off_date", TODAY)
     _d("c_off_monthly", 0.0); _d("c_off_lumps", [])
-    _d("c_extra_repay", [])  # NEW
+    _d("c_extra_repay", [])
     _d("c_fee_mo", 10.0); _d("c_fee_setup", 0.0); _d("c_fee_other", 0.0)
 
     # ── Shared anticipated/future rate changes ──
     _d("future_var_deltas", [])
 
     # ── Proposed Loan ──
-    _d("p_auto_amount", True); _d("p_loan_amt", 580_000.0)
-    _d("p_start_date", TODAY); _d("p_use_dates", False)
-    _d("p_end_date", add_months(TODAY, 300)); _d("p_term_mo", 300)
-    _d("p_adv_var_rate", 6.20); _d("p_adv_fix_rate", 5.89)
-    _d("p_fix_yrs", 3)
-    _d("p_rev_rate_override", False); _d("p_rev_rate", 6.20)
+    _d("p_auto_amount", True); _d("p_loan_amt", 1_130_000.0)
+    _d("p_start_date", TODAY); _d("p_use_dates", True)
+    _d("p_end_date", date(2044, 12, 8)); _d("p_term_mo", 251)
+    _d("p_adv_var_rate", 5.65); _d("p_adv_fix_rate", 5.89)
+    _d("p_fix_yrs", 2)
+    _d("p_rev_rate_override", False); _d("p_rev_rate", 5.65)
     _d("p_split_auto", True); _d("p_split_pct", 50.0)
 
     # Individualised fees — variable
-    _d("p_var_fee_mo", 10.0); _d("p_var_fee_setup", 800.0)
+    _d("p_var_fee_mo", 10.0); _d("p_var_fee_setup", 500.0)
     _d("p_var_fee_break", 0.0); _d("p_var_fee_other", 0.0)
     # Individualised fees — fixed
-    _d("p_fix_fee_mo", 10.0); _d("p_fix_fee_setup", 800.0)
-    _d("p_fix_fee_break", 0.0); _d("p_fix_fee_other", 0.0)
-    # Match toggle
-    _d("p_fees_match", True)
+    _d("p_fix_fee_mo", 10.0); _d("p_fix_fee_setup", 500.0)
+    _d("p_fix_fee_break", 395.0); _d("p_fix_fee_other", 0.0)
+    # Match toggle — OFF by default since fixed has breakage fee, variable doesn't
+    _d("p_fees_match", False)
 
     # Offset
-    _d("p_off_match", False)  # match to current loan offset
+    _d("p_off_match", False)
     _d("p_off_init", 0.0); _d("p_off_date", TODAY)
     _d("p_off_monthly", 0.0); _d("p_off_lumps", [])
-    _d("p_extra_repay", [])  # NEW
+    _d("p_extra_repay", [])
 
     # ── Strategy ──
     _d("strategy", "Balanced (Optimal Split)")
@@ -1904,20 +1908,35 @@ def forensic_compute(R):
     df_o, df_c, df_ps = R["df_orig"], R["df_curr"], R["df_ps"]
     df_pv, df_pf = R["df_pv"], R["df_pf"]
 
-    rba_rate = ss._rba_rate if ss._rba_rate else 4.35  # sensible fallback
+    rba_live_rate = ss._rba_rate if ss._rba_rate else 4.35
     rba_delta_pct = ss.rba_bps / 100.0 if ss.rba_bps != 0 else 0.0
+    # RBA rate AS SHOWN in analysis = live rate + scenario delta
+    rba_rate = rba_live_rate + rba_delta_pct
 
-    # Current loan headline rate (after deltas to today + RBA scenario)
-    # RBA scenario affects variable rates — current loan is variable
+    # Combined anticipated rate changes (shared between Current and Proposed variable)
+    # These must flow into forensic rate derivations too, not just compute_all()
+    anticipated_pct = 0.0
+    if ss.future_var_deltas:
+        for row in ss.future_var_deltas:
+            try:
+                anticipated_pct += float(row[1])
+            except Exception:
+                pass
+    # Total variable rate adjustment = anticipated changes + RBA scenario
+    var_total_adjust = anticipated_pct + rba_delta_pct
+
+    # Current loan headline rate — includes historical rate changes, anticipated
+    # future rate changes (shared from Current Loan section), and RBA scenario delta.
+    # Current loan is always variable so ALL three apply.
     if ss.c_is_cont:
-        c_rate = eff_rate_from_deltas(ss.o_rate, ss.o_rate_deltas, as_of=TODAY) + rba_delta_pct
+        c_rate = eff_rate_from_deltas(ss.o_rate, ss.o_rate_deltas, as_of=TODAY) + var_total_adjust
         c_bal = ss.o_balance
         c_fee_mo = ss.o_fee_mo
         c_setup = 0.0
         c_break = ss.o_fee_break
         c_term_rem = max(0, ss.o_term_mo - months_between(ss.o_balance_date, TODAY))
     else:
-        c_rate = ss.c_rate + rba_delta_pct
+        c_rate = ss.c_rate + var_total_adjust
         c_bal = ss.c_balance
         c_fee_mo = ss.c_fee_mo
         c_setup = ss.c_fee_setup
@@ -1925,9 +1944,10 @@ def forensic_compute(R):
         c_term_rem = ss.c_term_mo
 
     # Proposed headline — weighted by split
-    # Variable side gets RBA delta; Fixed side does NOT (fixed is immune during fix period)
+    # Variable side gets the SAME var_total_adjust (anticipated + RBA scenario).
+    # Fixed side rate remains as advertised during the Fixed Period (immune).
     best_pct = R["best_pct"]
-    p_var_with_rba = ss.p_adv_var_rate + rba_delta_pct
+    p_var_with_rba = ss.p_adv_var_rate + var_total_adjust
     p_blended_rate = (best_pct/100)*ss.p_adv_fix_rate + (1-best_pct/100)*p_var_with_rba
     p_eff_var = R["eff_var"]
     p_eff_fix = R["eff_fix"]
@@ -2051,6 +2071,109 @@ def forensic_compute(R):
     except Exception:
         pass
 
+    # ── NEW METRICS (additive — existing outputs unchanged) ──────────────
+    # Need proposed loan amortised WITHOUT offset to measure offset contribution.
+    # Use proposed schedule but with off_init=0, off_monthly=0, no lumps.
+    _som_ = date(TODAY.year, TODAY.month, 1)
+    try:
+        p_var_deltas_clean = list(ss.future_var_deltas)
+        if rba_delta_pct != 0:
+            p_var_deltas_clean = p_var_deltas_clean + [[max(_som_, ss.p_start_date), rba_delta_pct]]
+        p_vsched_clean = build_rate_schedule(ss.p_adv_var_rate, p_var_deltas_clean)
+        p_f_amt = ss.p_loan_amt * best_pct / 100
+        p_v_amt = ss.p_loan_amt * (100 - best_pct) / 100
+        fix_mo_period = ss.p_fix_yrs * 12
+        fix_rev_date = add_months(TODAY, fix_mo_period)
+        eff_rev_rate = ss.p_rev_rate + (rba_delta_pct if rba_delta_pct != 0 else 0.0)
+        p_fsched_clean = [(date(1900, 1, 1), ss.p_adv_fix_rate), (fix_rev_date, eff_rev_rate)]
+
+        df_pv_noff = amortize(p_v_amt, TODAY, ss.p_term_mo, p_vsched_clean,
+                              0.0, 0.0, (), (),
+                              ss.p_var_fee_mo * (100 - best_pct) / 100,
+                              ss.maintain_pmt) if p_v_amt > 1 else pd.DataFrame()
+        df_pf_noff = amortize(p_f_amt, TODAY, ss.p_term_mo, p_fsched_clean,
+                              0.0, 0.0, (), (),
+                              (ss.p_fix_fee_mo if not ss.p_fees_match else ss.p_var_fee_mo) * best_pct / 100,
+                              ss.maintain_pmt) if p_f_amt > 1 else pd.DataFrame()
+        df_ps_noff = merge_schedules(df_pv_noff, df_pf_noff)
+    except Exception:
+        df_ps_noff = pd.DataFrame()
+
+    # Helper: interest accumulated over first N months of a dataframe
+    def interest_over_months(df, n_months):
+        if df is None or df.empty or n_months <= 0: return 0.0
+        # Find index of first forward-looking row then take n_months
+        mask = df["Date"].apply(lambda d: d >= TODAY)
+        fwd = df[mask]
+        if fwd.empty:
+            return df["Cum Interest"].iloc[min(n_months-1, len(df)-1)]
+        start_idx = fwd.index[0]
+        end_idx = min(start_idx + n_months, len(df)) - 1
+        if end_idx < start_idx: return 0.0
+        start_cum = df["Cum Interest"].iloc[start_idx - 1] if start_idx > 0 else 0.0
+        return df["Cum Interest"].iloc[end_idx] - start_cum
+
+    # Helper: total cost (payments + fees) accumulated over N months from today
+    def cost_over_months(df, n_months):
+        if df is None or df.empty or n_months <= 0: return 0.0
+        mask = df["Date"].apply(lambda d: d >= TODAY)
+        fwd = df[mask]
+        if fwd.empty:
+            return df["Cum Paid"].iloc[min(n_months-1, len(df)-1)]
+        start_idx = fwd.index[0]
+        end_idx = min(start_idx + n_months, len(df)) - 1
+        if end_idx < start_idx: return 0.0
+        start_cum = df["Cum Paid"].iloc[start_idx - 1] if start_idx > 0 else 0.0
+        return df["Cum Paid"].iloc[end_idx] - start_cum
+
+    fix_period_mo = ss.p_fix_yrs * 12
+
+    # Metric 1: Total interest over fixed period
+    int_curr_fixperiod = interest_over_months(df_c, fix_period_mo)
+    int_prop_fixperiod = interest_over_months(df_ps, fix_period_mo)
+    int_saving_fixperiod = int_curr_fixperiod - int_prop_fixperiod
+
+    # Metric 2: Total interest over loan term (full) — we have totals but use from today
+    int_curr_term = total_int_curr
+    int_prop_term = total_int_prop
+    int_saving_term = int_curr_term - int_prop_term
+
+    # Metric 3: Interest saved due to offset (proposed WITH offset vs proposed WITHOUT offset)
+    int_prop_noff_term = (df_ps_noff["Cum Interest"].iloc[-1]
+                          if (df_ps_noff is not None and not df_ps_noff.empty) else int_prop_term)
+    offset_interest_saving = max(0.0, int_prop_noff_term - int_prop_term)
+
+    # Metric 4: Effective rate decline for Variable (only) due to offset
+    # = Variable rate × (offset / variable_balance), capped at variable rate itself
+    if off_prop > 0 and best_pct < 100:
+        p_v_amt_for_rate = ss.p_loan_amt * (100 - best_pct) / 100
+        off_efficiency = min(1.0, off_prop / p_v_amt_for_rate) if p_v_amt_for_rate > 0 else 0.0
+        variable_effective_rate = p_var_with_rba * (1 - off_efficiency)
+        variable_rate_decline_pct = p_var_with_rba - variable_effective_rate
+    else:
+        variable_effective_rate = p_var_with_rba
+        variable_rate_decline_pct = 0.0
+
+    # Metric 5: Total $ saved (payments+fees) over fixed period
+    cost_curr_fixperiod = cost_over_months(df_c, fix_period_mo)
+    cost_prop_fixperiod = cost_over_months(df_ps, fix_period_mo)
+    cost_saving_fixperiod = cost_curr_fixperiod - cost_prop_fixperiod
+
+    # Metric 6: Total $ saved over loan term
+    total_cost_curr = df_c["Cum Paid"].iloc[-1] if (df_c is not None and not df_c.empty) else 0
+    total_cost_prop = df_ps["Cum Paid"].iloc[-1] if (df_ps is not None and not df_ps.empty) else 0
+    cost_saving_term = total_cost_curr - total_cost_prop
+
+    # Metric 7: Months saved due to refinancing strategy vs due to offset
+    # a) Refinancing strategy alone (proposed WITHOUT offset vs current)
+    months_strategy = max(0, len(df_c) - len(df_ps_noff)) if (
+        df_c is not None and not df_c.empty
+        and df_ps_noff is not None and not df_ps_noff.empty) else 0
+    # b) Offset alone (proposed WITH offset vs proposed WITHOUT offset)
+    months_offset = max(0, len(df_ps_noff) - len(df_ps)) if (
+        df_ps_noff is not None and not df_ps_noff.empty
+        and df_ps is not None and not df_ps.empty) else 0
+
     # ── THEME V: Checklist conditions ────────────────────────────────────
     has_split = 0 < best_pct < 100
     has_offset = off_prop > 0
@@ -2059,8 +2182,13 @@ def forensic_compute(R):
 
     return {
         "rba_rate": rba_rate,
+        "rba_live_rate": rba_live_rate,
+        "rba_delta_pct": rba_delta_pct,
+        "anticipated_pct": anticipated_pct,
+        "var_total_adjust": var_total_adjust,
         "c_rate": c_rate, "c_bal": c_bal, "c_term_rem": c_term_rem,
         "p_blended_rate": p_blended_rate, "p_eff_var": p_eff_var, "p_eff_fix": p_eff_fix,
+        "p_var_with_rba": p_var_with_rba,
         "off_curr": off_curr, "off_prop": off_prop,
         "curr_eff_after_off": curr_eff_after_off,
         "prop_eff_after_off": prop_eff_after_off,
@@ -2082,7 +2210,30 @@ def forensic_compute(R):
         "has_split": has_split, "has_offset": has_offset, "has_fixed": has_fixed,
         "rate_drop": rate_drop,
         "best_pct": best_pct,
+        # New metrics (additive)
+        "fix_period_mo": fix_period_mo,
+        "fix_period_yrs": ss.p_fix_yrs,
+        "int_curr_fixperiod": int_curr_fixperiod,
+        "int_prop_fixperiod": int_prop_fixperiod,
+        "int_saving_fixperiod": int_saving_fixperiod,
+        "int_curr_term": int_curr_term,
+        "int_prop_term": int_prop_term,
+        "int_saving_term": int_saving_term,
+        "offset_interest_saving": offset_interest_saving,
+        "variable_rate_decline_pct": variable_rate_decline_pct,
+        "variable_effective_rate": variable_effective_rate,
+        "cost_curr_fixperiod": cost_curr_fixperiod,
+        "cost_prop_fixperiod": cost_prop_fixperiod,
+        "cost_saving_fixperiod": cost_saving_fixperiod,
+        "total_cost_curr": total_cost_curr,
+        "total_cost_prop": total_cost_prop,
+        "cost_saving_term": cost_saving_term,
+        "months_strategy": months_strategy,
+        "months_offset": months_offset,
+        "int_prop_noff_term": int_prop_noff_term,
+        "df_ps_noff": df_ps_noff,
     }
+
 
 def _hero_card(tier_lbl: str, clr: str, big_text: str, sub_text: str = ""):
     """Large coloured hero-style summary card used across themes."""
@@ -2124,7 +2275,12 @@ def theme_i_anchor(R, F):
     # Comparison grid
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.markdown(metric_card("RBA Cash Rate (live)", fp(rba)),
+        rba_diff = ""
+        if F["rba_delta_pct"] != 0:
+            sign = "+" if F["rba_delta_pct"] > 0 else ""
+            rba_diff = f'Scenario {sign}{F["rba_delta_pct"]:.2f}% vs live {fp(F["rba_live_rate"])}'
+        st.markdown(metric_card("RBA Cash Rate", fp(rba),
+                                 diff=rba_diff, diff_neutral=True),
                     unsafe_allow_html=True)
     with c2:
         tierL, tierC = F["curr_tier"]
@@ -2254,6 +2410,75 @@ def theme_ii_strategy(R, F):
             f'<div style="color:#d4dbe8;font-size:0.88rem"><strong>{fc(interest)}</strong> interest{delta_str}</div>'
             f'<div style="color:#64748b;font-size:0.78rem;margin-top:4px;font-style:italic">{verdict}</div>'
             f'</div>', unsafe_allow_html=True)
+
+    # ── NEW: Savings over Fixed Period vs Full Term (additive) ───────────
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="sub-title">Savings Window — Current Loan vs Proposed Loan</div>',
+        unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="note">Total interest and total cost (payments + fees) that you '
+        f'would pay under the Current Loan vs the Proposed Loan, measured over two '
+        f'time windows: the <strong>{F["fix_period_yrs"]}-year Fixed Period</strong> '
+        f'and the <strong>full loan term</strong>.</div>',
+        unsafe_allow_html=True)
+
+    st.markdown('<div class="sub-title">Over the Fixed Period '
+                f'({F["fix_period_yrs"]} years / {F["fix_period_mo"]} months)</div>',
+                unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(metric_card("Current Loan — Interest",
+                                 fc(F["int_curr_fixperiod"])),
+                    unsafe_allow_html=True)
+    with c2:
+        st.markdown(metric_card("Proposed Loan — Interest",
+                                 fc(F["int_prop_fixperiod"]),
+                                 diff=f'−{fc(F["int_saving_fixperiod"])} vs Current'
+                                      if F["int_saving_fixperiod"] > 0
+                                      else f'+{fc(-F["int_saving_fixperiod"])} vs Current',
+                                 diff_pos=(F["int_saving_fixperiod"] > 0)),
+                    unsafe_allow_html=True)
+    with c3:
+        st.markdown(metric_card("Current Loan — Total Cost",
+                                 fc(F["cost_curr_fixperiod"])),
+                    unsafe_allow_html=True)
+    with c4:
+        st.markdown(metric_card("Proposed Loan — Total Cost",
+                                 fc(F["cost_prop_fixperiod"]),
+                                 diff=f'−{fc(F["cost_saving_fixperiod"])} vs Current'
+                                      if F["cost_saving_fixperiod"] > 0
+                                      else f'+{fc(-F["cost_saving_fixperiod"])} vs Current',
+                                 diff_pos=(F["cost_saving_fixperiod"] > 0)),
+                    unsafe_allow_html=True)
+
+    st.markdown('<div class="sub-title">Over the Full Loan Term</div>',
+                unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(metric_card("Current Loan — Total Interest",
+                                 fc(F["int_curr_term"])),
+                    unsafe_allow_html=True)
+    with c2:
+        st.markdown(metric_card("Proposed Loan — Total Interest",
+                                 fc(F["int_prop_term"]),
+                                 diff=f'−{fc(F["int_saving_term"])} vs Current'
+                                      if F["int_saving_term"] > 0
+                                      else f'+{fc(-F["int_saving_term"])} vs Current',
+                                 diff_pos=(F["int_saving_term"] > 0)),
+                    unsafe_allow_html=True)
+    with c3:
+        st.markdown(metric_card("Current Loan — Total Cost",
+                                 fc(F["total_cost_curr"])),
+                    unsafe_allow_html=True)
+    with c4:
+        st.markdown(metric_card("Proposed Loan — Total Cost",
+                                 fc(F["total_cost_prop"]),
+                                 diff=f'−{fc(F["cost_saving_term"])} vs Current'
+                                      if F["cost_saving_term"] > 0
+                                      else f'+{fc(-F["cost_saving_term"])} vs Current',
+                                 diff_pos=(F["cost_saving_term"] > 0)),
+                    unsafe_allow_html=True)
 
     if not F["has_offset"]:
         st.markdown(
@@ -2461,6 +2686,66 @@ def theme_iv_forecast(R, F):
                            yaxis_title="Outstanding Balance ($)")
         fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.04))
         st.plotly_chart(fig, use_container_width=True)
+
+    # ── NEW: Offset impact + months-saved decomposition (additive) ───────
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown('<div class="sub-title">Offset Account — Lifetime Impact</div>',
+                unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="note">Isolating the value of your offset balance by running the '
+        f'Proposed Loan twice: once WITH your offset (${F["off_prop"]:,.0f}) and once '
+        f'WITHOUT. The difference is attributable to the offset alone.</div>',
+        unsafe_allow_html=True)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(metric_card(
+            "Interest Saved (Offset)",
+            fc(F["offset_interest_saving"]),
+            diff=(f"over {F['fix_period_yrs']}y fixed + remaining term"
+                  if F["offset_interest_saving"] > 0 else "no offset balance"),
+            diff_neutral=True),
+            unsafe_allow_html=True)
+    with c2:
+        st.markdown(metric_card(
+            "Variable Rate — Effective After Offset",
+            fp(F["variable_effective_rate"]),
+            diff=(f"−{F['variable_rate_decline_pct']:.2f}% vs headline "
+                  f"{fp(F['p_var_with_rba'])}"
+                  if F["variable_rate_decline_pct"] > 0
+                  else "no offset"),
+            diff_pos=True),
+            unsafe_allow_html=True)
+    with c3:
+        st.markdown(metric_card(
+            "Months Saved — Refinancing Strategy",
+            f"{F['months_strategy']} mo"
+              if F["months_strategy"] > 0 else "—",
+            diff=(f"{F['months_strategy']/12:.1f} years earlier"
+                  if F["months_strategy"] > 0 else ""),
+            diff_pos=True),
+            unsafe_allow_html=True)
+    with c4:
+        st.markdown(metric_card(
+            "Months Saved — Offset Balance",
+            f"{F['months_offset']} mo"
+              if F["months_offset"] > 0 else "—",
+            diff=(f"{F['months_offset']/12:.1f} years earlier"
+                  if F["months_offset"] > 0 else ""),
+            diff_pos=True),
+            unsafe_allow_html=True)
+
+    # Interpretive note
+    total_mo_saved = F["months_strategy"] + F["months_offset"]
+    if total_mo_saved > 0:
+        pct_strategy = (F["months_strategy"] / total_mo_saved * 100) if total_mo_saved else 0
+        pct_offset = 100 - pct_strategy
+        st.markdown(
+            f'<div class="note-ok">Combined: <strong>{total_mo_saved} months '
+            f'({total_mo_saved/12:.1f} years)</strong> shaved off the loan. '
+            f'Strategy contributes <strong>{pct_strategy:.0f}%</strong>, offset '
+            f'contributes <strong>{pct_offset:.0f}%</strong>.</div>',
+            unsafe_allow_html=True)
 
 # ── THEME V: Interrogation Checklist ────────────────────────────────────
 def theme_v_checklist(R, F):
